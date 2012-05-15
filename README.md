@@ -1,5 +1,5 @@
 PostgreSQL - Document Collection Foreign Data Wrapper (dc_fdw)
-=====================================================
+--------------------------------------------------------------
 
 More information can be found in the wiki https://github.com/ZhengYang/dc_fdw/wiki
 

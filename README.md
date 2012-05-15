@@ -10,5 +10,4 @@ Features:
 *Vector Space Model
 
 --
-Zheng Yang
-zhengyang4k@gmail.com
+by Zheng Yang <zhengyang4k@gmail.com>

@@ -1,21 +1,30 @@
 /*-------------------------------------------------------------------------
  *
- * file_fdw.c
- *		  foreign-data wrapper for server-side flat files.
+ * dc_fdw.c
+ *		  foreign-data wrapper for server-side document collections.
  *
- * Copyright (c) 2010-2011, PostgreSQL Global Development Group
+ * Copyright (c) 2012, PostgreSQL Global Development Group
+ *
+ * This software is released under the PostgreSQL Licence.
+ *
+ * Author: Zheng Yang <zhengyang4k@gmail.com>
  *
  * IDENTIFICATION
- *		  contrib/file_fdw/file_fdw.c
+ *		  contrib/dc_fdw/dc_fdw.c
  *
  *-------------------------------------------------------------------------
  */
+
+/* Debug mode flag */
+#define DEBUG
+ 
 #include "postgres.h"
 
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include "access/reloptions.h"
+#include "catalog/pg_foreign_server.h"
 #include "catalog/pg_foreign_table.h"
 #include "commands/copy.h"
 #include "commands/defrem.h"
@@ -30,42 +39,29 @@ PG_MODULE_MAGIC;
 /*
  * Describes the valid options for objects that use this wrapper.
  */
-struct FileFdwOption
+struct DcFdwOption
 {
 	const char *optname;
 	Oid			optcontext;		/* Oid of catalog in which option may appear */
 };
 
 /*
- * Valid options for file_fdw.
- * These options are based on the options for COPY FROM command.
+ * Valid options for dc_fdw.
  *
  * Note: If you are adding new option for user mapping, you need to modify
- * fileGetOptions(), which currently doesn't bother to look at user mappings.
+ * dcGetOptions(), which currently doesn't bother to look at user mappings.
  */
-static struct FileFdwOption valid_options[] = {
-	/* File options */
-	{"filename", ForeignTableRelationId},
+static struct DcFdwOption valid_options[] = {
+    /* Foreign table options */
+	
+	/* where the data files located */
+	{"data_dir", ForeignTableRelationId},
+	/* where the index file located */
+	{"index_dir", ForeignTableRelationId},
 
-	/* Format options */
 	/* oids option is not supported */
-	{"format", ForeignTableRelationId},
-	{"header", ForeignTableRelationId},
-	{"delimiter", ForeignTableRelationId},
-	{"quote", ForeignTableRelationId},
-	{"escape", ForeignTableRelationId},
-	{"null", ForeignTableRelationId},
+	{"language", ForeignTableRelationId},
 	{"encoding", ForeignTableRelationId},
-
-	/*
-	 * force_quote is not supported by file_fdw because it's for COPY TO.
-	 */
-
-	/*
-	 * force_not_null is not supported by file_fdw.  It would need a parser
-	 * for list of columns, not to mention a way to check the column list
-	 * against the table.
-	 */
 
 	/* Sentinel */
 	{NULL, InvalidOid}
@@ -74,42 +70,42 @@ static struct FileFdwOption valid_options[] = {
 /*
  * FDW-specific information for ForeignScanState.fdw_state.
  */
-typedef struct FileFdwExecutionState
+typedef struct DcFdwExecutionState
 {
-	char	   *filename;		/* file to read */
-	List	   *options;		/* merged COPY options, excluding filename */
-	CopyState	cstate;			/* state of reading file */
-} FileFdwExecutionState;
+	char	   *data_dir;		    /* dc to read */
+	List	   *options;		/* merged COPY options, excluding data_dir */
+	CopyState	cstate;			/* state of reading dc */
+} DcFdwExecutionState;
 
 /*
  * SQL functions
  */
-extern Datum file_fdw_handler(PG_FUNCTION_ARGS);
-extern Datum file_fdw_validator(PG_FUNCTION_ARGS);
+extern Datum dc_fdw_handler(PG_FUNCTION_ARGS);
+extern Datum dc_fdw_validator(PG_FUNCTION_ARGS);
 
-PG_FUNCTION_INFO_V1(file_fdw_handler);
-PG_FUNCTION_INFO_V1(file_fdw_validator);
+PG_FUNCTION_INFO_V1(dc_fdw_handler);
+PG_FUNCTION_INFO_V1(dc_fdw_validator);
 
 /*
  * FDW callback routines
  */
-static FdwPlan *filePlanForeignScan(Oid foreigntableid,
+static FdwPlan *dcPlanForeignScan(Oid foreigntableid,
 					PlannerInfo *root,
 					RelOptInfo *baserel);
-static void fileExplainForeignScan(ForeignScanState *node, ExplainState *es);
-static void fileBeginForeignScan(ForeignScanState *node, int eflags);
-static TupleTableSlot *fileIterateForeignScan(ForeignScanState *node);
-static void fileReScanForeignScan(ForeignScanState *node);
-static void fileEndForeignScan(ForeignScanState *node);
+static void dcExplainForeignScan(ForeignScanState *node, ExplainState *es);
+static void dcBeginForeignScan(ForeignScanState *node, int eflags);
+static TupleTableSlot *dcIterateForeignScan(ForeignScanState *node);
+static void dcReScanForeignScan(ForeignScanState *node);
+static void dcEndForeignScan(ForeignScanState *node);
 
 /*
  * Helper functions
  */
 static bool is_valid_option(const char *option, Oid context);
-static void fileGetOptions(Oid foreigntableid,
-			   char **filename, List **other_options);
+static void dcGetOptions(Oid foreigntableid,
+			   char **data_dir, char **index_dir, char **language, char **encoding, List **other_options);
 static void estimate_costs(PlannerInfo *root, RelOptInfo *baserel,
-			   const char *filename,
+			   const char *data_dir,
 			   Cost *startup_cost, Cost *total_cost);
 
 
@@ -118,55 +114,66 @@ static void estimate_costs(PlannerInfo *root, RelOptInfo *baserel,
  * to my callback routines.
  */
 Datum
-file_fdw_handler(PG_FUNCTION_ARGS)
+dc_fdw_handler(PG_FUNCTION_ARGS)
 {
 	FdwRoutine *fdwroutine = makeNode(FdwRoutine);
 
-	fdwroutine->PlanForeignScan = filePlanForeignScan;
-	fdwroutine->ExplainForeignScan = fileExplainForeignScan;
-	fdwroutine->BeginForeignScan = fileBeginForeignScan;
-	fdwroutine->IterateForeignScan = fileIterateForeignScan;
-	fdwroutine->ReScanForeignScan = fileReScanForeignScan;
-	fdwroutine->EndForeignScan = fileEndForeignScan;
+#ifdef DEBUG
+    elog(NOTICE, "dc_fdw_handler");
+#endif
+
+	fdwroutine->PlanForeignScan = dcPlanForeignScan;
+	fdwroutine->ExplainForeignScan = dcExplainForeignScan;
+	fdwroutine->BeginForeignScan = dcBeginForeignScan;
+	fdwroutine->IterateForeignScan = dcIterateForeignScan;
+	fdwroutine->ReScanForeignScan = dcReScanForeignScan;
+	fdwroutine->EndForeignScan = dcEndForeignScan;
 
 	PG_RETURN_POINTER(fdwroutine);
 }
 
 /*
  * Validate the generic options given to a FOREIGN DATA WRAPPER, SERVER,
- * USER MAPPING or FOREIGN TABLE that uses file_fdw.
+ * USER MAPPING or FOREIGN TABLE that uses dc_fdw.
  *
  * Raise an ERROR if the option or its value is considered invalid.
  */
 Datum
-file_fdw_validator(PG_FUNCTION_ARGS)
+dc_fdw_validator(PG_FUNCTION_ARGS)
 {
 	List	   *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
 	Oid			catalog = PG_GETARG_OID(1);
-	char	   *filename = NULL;
+	char	   *data_dir = NULL;
+    char       *index_dir = NULL;
+    char       *language = NULL;
+    char       *encoding = NULL;
 	List	   *other_options = NIL;
 	ListCell   *cell;
 
+#ifdef DEBUG
+    elog(NOTICE, "dc_fdw_validator");
+#endif
+
 	/*
-	 * Only superusers are allowed to set options of a file_fdw foreign table.
-	 * This is because the filename is one of those options, and we don't want
+	 * Only superusers are allowed to set options of a dc_fdw foreign table.
+	 * This is because the data_dir is one of those options, and we don't want
 	 * non-superusers to be able to determine which file gets read.
 	 *
 	 * Putting this sort of permissions check in a validator is a bit of a
 	 * crock, but there doesn't seem to be any other place that can enforce
 	 * the check more cleanly.
 	 *
-	 * Note that the valid_options[] array disallows setting filename at any
+	 * Note that the valid_options[] array disallows setting data_dir at any
 	 * options level other than foreign table --- otherwise there'd still be a
 	 * security hole.
 	 */
 	if (catalog == ForeignTableRelationId && !superuser())
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("only superuser can change options of a file_fdw foreign table")));
+				 errmsg("only superuser can change options of a dc_fdw foreign table")));
 
 	/*
-	 * Check that only options supported by file_fdw, and allowed for the
+	 * Check that only options supported by dc_fdw, and allowed for the
 	 * current object type, are given.
 	 */
 	foreach(cell, options_list)
@@ -175,7 +182,7 @@ file_fdw_validator(PG_FUNCTION_ARGS)
 
 		if (!is_valid_option(def->defname, catalog))
 		{
-			struct FileFdwOption *opt;
+			struct DcFdwOption *opt;
 			StringInfoData buf;
 
 			/*
@@ -197,31 +204,52 @@ file_fdw_validator(PG_FUNCTION_ARGS)
 							 buf.data)));
 		}
 
-		/* Separate out filename, since ProcessCopyOptions won't allow it */
-		if (strcmp(def->defname, "filename") == 0)
+		if (strcmp(def->defname, "data_dir") == 0)
 		{
-			if (filename)
+			if (data_dir)
 				ereport(ERROR,
 						(errcode(ERRCODE_SYNTAX_ERROR),
-						 errmsg("conflicting or redundant options")));
-			filename = defGetString(def);
+						 errmsg("redundant options")));
+			data_dir = defGetString(def);
+		}
+		
+		if (strcmp(def->defname, "index_dir") == 0)
+		{
+			if (index_dir)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("redundant options")));
+			index_dir = defGetString(def);
+		}
+		
+		if (strcmp(def->defname, "language") == 0)
+		{
+			if (language)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("redundant options")));
+			language = defGetString(def);
+		}
+		
+		if (strcmp(def->defname, "encoding") == 0)
+		{
+			if (encoding)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("redundant options")));
+			encoding = defGetString(def);
 		}
 		else
 			other_options = lappend(other_options, def);
 	}
 
 	/*
-	 * Now apply the core COPY code's validation logic for more checks.
+	 * Dcname option is required for dc_fdw foreign tables.
 	 */
-	ProcessCopyOptions(NULL, true, other_options);
-
-	/*
-	 * Filename option is required for file_fdw foreign tables.
-	 */
-	if (catalog == ForeignTableRelationId && filename == NULL)
+	if (catalog == ForeignTableRelationId && data_dir == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_DYNAMIC_PARAMETER_VALUE_NEEDED),
-				 errmsg("filename is required for file_fdw foreign tables")));
+				 errmsg("data_dir is required for dc_fdw foreign tables")));
 
 	PG_RETURN_VOID();
 }
@@ -233,7 +261,11 @@ file_fdw_validator(PG_FUNCTION_ARGS)
 static bool
 is_valid_option(const char *option, Oid context)
 {
-	struct FileFdwOption *opt;
+	struct DcFdwOption *opt;
+
+#ifdef DEBUG
+    elog(NOTICE, "is_valid_option");
+#endif
 
 	for (opt = valid_options; opt->optname; opt++)
 	{
@@ -244,25 +276,30 @@ is_valid_option(const char *option, Oid context)
 }
 
 /*
- * Fetch the options for a file_fdw foreign table.
+ * Fetch the options for a dc_fdw foreign table.
  *
- * We have to separate out "filename" from the other options because
+ * We have to separate out "data_dir" from the other options because
  * it must not appear in the options list passed to the core COPY code.
  */
 static void
-fileGetOptions(Oid foreigntableid,
-			   char **filename, List **other_options)
+dcGetOptions(Oid foreigntableid,
+			   char **data_dir, char **index_dir, char **language, char **encoding, List **other_options)
 {
-	ForeignTable *table;
-	ForeignServer *server;
-	ForeignDataWrapper *wrapper;
-	List	   *options;
-	ListCell   *lc,
-			   *prev;
+	ForeignTable        *table;
+	ForeignServer       *server;
+	ForeignDataWrapper  *wrapper;
+	List	            *options;
+	ListCell            *lc,
+			            *prev;
+
+#ifdef DEBUG
+    elog(NOTICE, "dcGetOptions");
+#endif
+
 
 	/*
 	 * Extract options from FDW objects.  We ignore user mappings because
-	 * file_fdw doesn't have any options that can be specified there.
+	 * dc_fdw doesn't have any options that can be specified there.
 	 *
 	 * (XXX Actually, given the current contents of valid_options[], there's
 	 * no point in examining anything except the foreign table's own options.
@@ -278,96 +315,131 @@ fileGetOptions(Oid foreigntableid,
 	options = list_concat(options, table->options);
 
 	/*
-	 * Separate out the filename.
+	 * Separate out individual options.
 	 */
-	*filename = NULL;
+	*data_dir = NULL;
+    *index_dir = NULL;
+    *language = NULL;
+    *encoding = NULL;
+    
 	prev = NULL;
 	foreach(lc, options)
 	{
 		DefElem    *def = (DefElem *) lfirst(lc);
 
-		if (strcmp(def->defname, "filename") == 0)
+		if (strcmp(def->defname, "data_dir") == 0)
 		{
-			*filename = defGetString(def);
-			options = list_delete_cell(options, lc, prev);
-			break;
+			*data_dir = defGetString(def);
+            continue;
 		}
-		prev = lc;
+		
+		if (strcmp(def->defname, "index_dir") == 0)
+		{
+            *index_dir = defGetString(def);
+            continue;
+		}
+		
+		if (strcmp(def->defname, "language") == 0)
+		{
+            *language = defGetString(def);
+            continue;
+		}
+		
+		if (strcmp(def->defname, "encoding") == 0)
+		{
+            *encoding = defGetString(def);
+		}
 	}
-
+	
 	/*
-	 * The validator should have checked that a filename was included in the
+	 * The validator should have checked that a data_dir directory was included in the
 	 * options, but check again, just in case.
 	 */
-	if (*filename == NULL)
-		elog(ERROR, "filename is required for file_fdw foreign tables");
+	if (*data_dir == NULL)
+		elog(ERROR, "data_dir is required for dc_fdw foreign tables");
 
 	*other_options = options;
 }
 
 /*
- * filePlanForeignScan
+ * dcPlanForeignScan
  *		Create a FdwPlan for a scan on the foreign table
  */
 static FdwPlan *
-filePlanForeignScan(Oid foreigntableid,
+dcPlanForeignScan(Oid foreigntableid,
 					PlannerInfo *root,
 					RelOptInfo *baserel)
 {
 	FdwPlan    *fdwplan;
-	char	   *filename;
-	List	   *options;
+	/*char	   *data_dir;*/
+	/*List	   *options;*/
 
-	/* Fetch options --- we only need filename at this point */
-	fileGetOptions(foreigntableid, &filename, &options);
+#ifdef DEBUG
+    elog(NOTICE, "dcPlanForeignScan");
+#endif
 
+	/* Fetch options --- we only need data_dir at this point */
+	/*dcGetOptions(foreigntableid, &data_dir, &options);*/
+	
 	/* Construct FdwPlan with cost estimates */
 	fdwplan = makeNode(FdwPlan);
-	estimate_costs(root, baserel, filename,
-				   &fdwplan->startup_cost, &fdwplan->total_cost);
-	fdwplan->fdw_private = NIL; /* not used */
-
+	/*estimate_costs(root, baserel, data_dir,
+				   &fdwplan->startup_cost, &fdwplan->total_cost);*/
+	/*fdwplan->fdw_private = NIL;*/ /* not used */
+	fdwplan->startup_cost = 100;
+    fdwplan->total_cost = 100;
 	return fdwplan;
 }
 
 /*
- * fileExplainForeignScan
+ * dcExplainForeignScan
  *		Produce extra output for EXPLAIN
  */
 static void
-fileExplainForeignScan(ForeignScanState *node, ExplainState *es)
+dcExplainForeignScan(ForeignScanState *node, ExplainState *es)
 {
-	char	   *filename;
+	char	   *data_dir;
+    char       *index_dir;
+    char       *language;
+    char       *encoding;
 	List	   *options;
 
-	/* Fetch options --- we only need filename at this point */
-	fileGetOptions(RelationGetRelid(node->ss.ss_currentRelation),
-				   &filename, &options);
+#ifdef DEBUG
+    elog(NOTICE, "dcExplainForeignScan");
+#endif
 
-	ExplainPropertyText("Foreign File", filename, es);
 
-	/* Suppress file size if we're not showing cost details */
+	/* Fetch options --- we only need data_dir at this point */
+	dcGetOptions(RelationGetRelid(node->ss.ss_currentRelation),
+				   &data_dir, &index_dir, &language, &encoding, &options);
+
+	ExplainPropertyText("Foreign Document Collection", data_dir, es);
+
+	/* Suppress dc size if we're not showing cost details */
 	if (es->costs)
 	{
 		struct stat stat_buf;
 
-		if (stat(filename, &stat_buf) == 0)
-			ExplainPropertyLong("Foreign File Size", (long) stat_buf.st_size,
+		if (stat(data_dir, &stat_buf) == 0)
+			ExplainPropertyLong("Foreign Document Collection Size", (long) stat_buf.st_size,
 								es);
 	}
 }
 
 /*
- * fileBeginForeignScan
- *		Initiate access to the file by creating CopyState
+ * dcBeginForeignScan
+ *		Initiate access to the dc by creating CopyState
  */
 static void
-fileBeginForeignScan(ForeignScanState *node, int eflags)
+dcBeginForeignScan(ForeignScanState *node, int eflags)
 {
-	char	   *filename;
+	char	   *data_dir;
+    char       *index_dir;
+    char       *language;
+    char       *encoding;
 	List	   *options;
 	CopyState	cstate;
-	FileFdwExecutionState *festate;
+	DcFdwExecutionState *festate;
 
 	/*
 	 * Do nothing in EXPLAIN (no ANALYZE) case.  node->fdw_state stays NULL.
@@ -376,15 +448,15 @@ fileBeginForeignScan(ForeignScanState *node, int eflags)
 		return;
 
 	/* Fetch options of foreign table */
-	fileGetOptions(RelationGetRelid(node->ss.ss_currentRelation),
-				   &filename, &options);
+	dcGetOptions(RelationGetRelid(node->ss.ss_currentRelation),
+				   &data_dir, &index_dir, &language, &encoding, &options);
 
 	/*
 	 * Create CopyState from FDW options.  We always acquire all columns, so
 	 * as to match the expected ScanTupleSlot signature.
 	 */
 	cstate = BeginCopyFrom(node->ss.ss_currentRelation,
-						   filename,
+						   data_dir,
 						   NIL,
 						   options);
 
@@ -392,8 +464,8 @@ fileBeginForeignScan(ForeignScanState *node, int eflags)
 	 * Save state in node->fdw_state.  We must save enough information to call
 	 * BeginCopyFrom() again.
 	 */
-	festate = (FileFdwExecutionState *) palloc(sizeof(FileFdwExecutionState));
-	festate->filename = filename;
+	festate = (DcFdwExecutionState *) palloc(sizeof(DcFdwExecutionState));
+	festate->data_dir = data_dir;
 	festate->options = options;
 	festate->cstate = cstate;
 
@@ -401,14 +473,14 @@ fileBeginForeignScan(ForeignScanState *node, int eflags)
 }
 
 /*
- * fileIterateForeignScan
- *		Read next record from the data file and store it into the
+ * dcIterateForeignScan
+ *		Read next record from the data dc and store it into the
  *		ScanTupleSlot as a virtual tuple
  */
 static TupleTableSlot *
-fileIterateForeignScan(ForeignScanState *node)
+dcIterateForeignScan(ForeignScanState *node)
 {
-	FileFdwExecutionState *festate = (FileFdwExecutionState *) node->fdw_state;
+	DcFdwExecutionState *festate = (DcFdwExecutionState *) node->fdw_state;
 	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
 	bool		found;
 	ErrorContextCallback errcontext;
@@ -422,11 +494,11 @@ fileIterateForeignScan(ForeignScanState *node)
 	/*
 	 * The protocol for loading a virtual tuple into a slot is first
 	 * ExecClearTuple, then fill the values/isnull arrays, then
-	 * ExecStoreVirtualTuple.  If we don't find another row in the file, we
+	 * ExecStoreVirtualTuple.  If we don't find another row in the dc, we
 	 * just skip the last step, leaving the slot empty as required.
 	 *
 	 * We can pass ExprContext = NULL because we read all columns from the
-	 * file, so no need to evaluate default expressions.
+	 * dc, so no need to evaluate default expressions.
 	 *
 	 * We can also pass tupleOid = NULL because we don't allow oids for
 	 * foreign tables.
@@ -445,13 +517,17 @@ fileIterateForeignScan(ForeignScanState *node)
 }
 
 /*
- * fileEndForeignScan
+ * dcEndForeignScan
  *		Finish scanning foreign table and dispose objects used for this scan
  */
 static void
-fileEndForeignScan(ForeignScanState *node)
+dcEndForeignScan(ForeignScanState *node)
 {
-	FileFdwExecutionState *festate = (FileFdwExecutionState *) node->fdw_state;
+	DcFdwExecutionState *festate = (DcFdwExecutionState *) node->fdw_state;
+
+#ifdef DEBUG
+    elog(NOTICE, "dcEndForeignScan");
+#endif
 
 	/* if festate is NULL, we are in EXPLAIN; nothing to do */
 	if (festate)
@@ -459,20 +535,18 @@ fileEndForeignScan(ForeignScanState *node)
 }
 
 /*
- * fileReScanForeignScan
+ * dcReScanForeignScan
  *		Rescan table, possibly with new parameters
  */
 static void
-fileReScanForeignScan(ForeignScanState *node)
+dcReScanForeignScan(ForeignScanState *node)
 {
-	FileFdwExecutionState *festate = (FileFdwExecutionState *) node->fdw_state;
+	/*DcFdwExecutionState *festate = (DcFdwExecutionState *) node->fdw_state;*/
 
-	EndCopyFrom(festate->cstate);
+#ifdef DEBUG
+    elog(NOTICE, "dcReScanForeignScan");
+#endif
 
-	festate->cstate = BeginCopyFrom(node->ss.ss_currentRelation,
-									festate->filename,
-									NIL,
-									festate->options);
 }
 
 /*
@@ -480,7 +554,7 @@ fileReScanForeignScan(ForeignScanState *node)
  */
 static void
 estimate_costs(PlannerInfo *root, RelOptInfo *baserel,
-			   const char *filename,
+			   const char *data_dir,
 			   Cost *startup_cost, Cost *total_cost)
 {
 	struct stat stat_buf;
@@ -492,10 +566,10 @@ estimate_costs(PlannerInfo *root, RelOptInfo *baserel,
 	Cost		cpu_per_tuple;
 
 	/*
-	 * Get size of the file.  It might not be there at plan time, though, in
+	 * Get size of the dc.  It might not be there at plan time, though, in
 	 * which case we have to use a default estimate.
 	 */
-	if (stat(filename, &stat_buf) < 0)
+	if (stat(data_dir, &stat_buf) < 0)
 		stat_buf.st_size = 10 * BLCKSZ;
 
 	/*
@@ -506,7 +580,7 @@ estimate_costs(PlannerInfo *root, RelOptInfo *baserel,
 		pages = 1;
 
 	/*
-	 * Estimate the number of tuples in the file.  We back into this estimate
+	 * Estimate the number of tuples in the dc.  We back into this estimate
 	 * using the planner's idea of the relation width; which is bogus if not
 	 * all columns are being read, not to mention that the text representation
 	 * of a row probably isn't the same size as its internal representation.
@@ -536,7 +610,7 @@ estimate_costs(PlannerInfo *root, RelOptInfo *baserel,
 	/*
 	 * Now estimate costs.	We estimate costs almost the same way as
 	 * cost_seqscan(), thus assuming that I/O costs are equivalent to a
-	 * regular table file of the same size.  However, we take per-tuple CPU
+	 * regular table dc of the same size.  However, we take per-tuple CPU
 	 * costs as 10x of a seqscan, to account for the cost of parsing records.
 	 */
 	run_cost += seq_page_cost * pages;

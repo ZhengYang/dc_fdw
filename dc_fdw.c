@@ -34,6 +34,8 @@
 #include "miscadmin.h"
 #include "optimizer/cost.h"
 
+#include "indexer.h"
+
 PG_MODULE_MAGIC;
 
 /*
@@ -167,6 +169,7 @@ dc_fdw_validator(PG_FUNCTION_ARGS)
 	 * options level other than foreign table --- otherwise there'd still be a
 	 * security hole.
 	 */
+	 
 	if (catalog == ForeignTableRelationId && !superuser())
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),

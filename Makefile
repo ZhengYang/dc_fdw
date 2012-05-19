@@ -1,13 +1,15 @@
 # contrib/dc_fdw/Makefile
 
-MODULES = dc_fdw
+# module built from multiple source files
+MODULE_big = dc_fdw
+OBJS = indexer.o
 
 EXTENSION = dc_fdw
 DATA = dc_fdw--1.0.sql
 
 REGRESS = dc_fdw
 
-EXTRA_CLEAN = sql/dc_fdw.sql expected/dc_fdw.out
+#EXTRA_CLEAN = sql/dc_fdw.sql expected/dc_fdw.out
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config

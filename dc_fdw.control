@@ -1,5 +1,5 @@
 # dc_fdw extension
 comment = 'foreign-data wrapper for document collection'
-default_version = '1.0'
+default_version = '0.1'
 module_pathname = '$libdir/dc_fdw'
 relocatable = true

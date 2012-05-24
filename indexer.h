@@ -18,9 +18,12 @@
 #ifndef INDEXER_H
 #define INDEXER_H
 
+
 #include "postgres.h"
+#include "funcapi.h"
 #include "storage/fd.h"
 
-extern int add(int a, int b);
+
+int dc_index(char* pathname);
 
 #endif   /* INDEXER_H */

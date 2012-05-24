@@ -26,6 +26,7 @@
 #include "access/reloptions.h"
 #include "catalog/pg_foreign_server.h"
 #include "catalog/pg_foreign_table.h"
+#include "catalog/pg_user_mapping.h"
 #include "commands/copy.h"
 #include "commands/defrem.h"
 #include "commands/explain.h"
@@ -182,7 +183,7 @@ dc_fdw_validator(PG_FUNCTION_ARGS)
 	foreach(cell, options_list)
 	{
 		DefElem    *def = (DefElem *) lfirst(cell);
-
+		
 		if (!is_valid_option(def->defname, catalog))
 		{
 			struct DcFdwOption *opt;
@@ -253,7 +254,24 @@ dc_fdw_validator(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_DYNAMIC_PARAMETER_VALUE_NEEDED),
 				 errmsg("data_dir is required for dc_fdw foreign tables")));
-
+	
+	/*
+	 * Start indexing procedures
+	 * Note that validate function is called when 
+	 *
+	 * 1. Creating ForeignServer 
+	 * 2. Creating ForeignTable
+	 * 3. Creating UserMapping
+	 *
+	 * Call the index function only when ForeignTable is being created.
+	 */
+	if (catalog == ForeignTableRelationId) {
+	    elog(NOTICE, "%s", "Creating Foreign Table...");
+	    elog(NOTICE, "%s", "Start indexing document collection...");
+	    dc_index(data_dir);
+	}
+    
+    
 	PG_RETURN_VOID();
 }
 

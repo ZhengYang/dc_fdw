@@ -18,10 +18,18 @@
 #ifndef INDEXER_H
 #define INDEXER_H
 
+/* Debug mode flag */
+#define DEBUG
+#define NOT_USED
+#define DC_F_BUFFER_SIZE 4*1024*1024 /* default buffer size for a file to be 4 MB ~= 4 million characters*/
+
 
 #include "postgres.h"
 #include "funcapi.h"
 #include "storage/fd.h"
+#include "tsearch/ts_utils.h"
+
+
 
 
 int dc_index(char* pathname);

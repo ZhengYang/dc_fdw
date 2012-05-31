@@ -2,7 +2,7 @@
 
 # module built from multiple source files
 MODULE_big = dc_fdw
-OBJS = dc_fdw.o indexer.o
+OBJS = indexer.o dc_fdw.o
 
 EXTENSION = dc_fdw
 DATA = dc_fdw--1.0.sql

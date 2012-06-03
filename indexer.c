@@ -27,6 +27,7 @@ int dc_index(char *pathname)
     File curr_file;
     mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
     TSVectorParseState parser_state;
+    struct SN_env *sn_env;
     
 #ifdef DEBUG
     elog(NOTICE, "%s", "dc_index");
@@ -50,7 +51,6 @@ int dc_index(char *pathname)
         char *strval;
         char *endptr;
         int   lenval;
-        int   sz_counter = 0;
         int   sz;
         
 #ifdef DEBUG
@@ -95,15 +95,22 @@ int dc_index(char *pathname)
          * 2. process one token at a time
          */
         parser_state = init_tsvector_parser(buffer, true, false);
-        do {
-            gettoken_tsvector(parser_state, &strval, &lenval, NULL, NULL, &endptr);
+        while (gettoken_tsvector(parser_state, &strval, &lenval, NULL, NULL, &endptr) == true)
+        {
 #ifdef DEBUG
             elog(NOTICE, "--TOKEN: %s", strval);
             elog(NOTICE, "--LENVAL: %d", lenval);
-            elog(NOTICE, "--ENDPTR: %s", endptr);
-            elog(NOTICE, "--SZ: %d", sz_counter);
 #endif
-        } while ((sz_counter += lenval) < sz);
+            /*
+             * stemming
+             */
+            sn_env = english_ISO_8859_1_create_env();
+            SN_set_current(sn_env, lenval, strval);
+            english_ISO_8859_1_stem (sn_env);
+            english_ISO_8859_1_close_env (sn_env);
+            sn_env->p[sn_env->l] = 0;
+            elog(NOTICE, "english_ISO_8859_1_stem stems '%s' to '%s'", strval, sn_env->p);
+        }
         
         /*
          *  Clean-up:

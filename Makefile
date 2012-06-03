@@ -2,7 +2,8 @@
 
 # module built from multiple source files
 MODULE_big = dc_fdw
-OBJS = indexer.o dc_fdw.o
+OBJS = indexer.o dc_fdw.o \
+../../src/backend/snowball/stem_ISO_8859_1_english.o ../../src/backend/snowball/api.o ../../src/backend/snowball/utilities.o
 
 EXTENSION = dc_fdw
 DATA = dc_fdw--1.0.sql

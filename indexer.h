@@ -32,6 +32,8 @@
 #include "tsearch/ts_locale.h"
 #include "tsearch/ts_public.h"
 #include "utils/builtins.h"
+#include "utils/hsearch.h" /* hashtable */
+#include "tsearch/ts_locale.h" /* lower str */
 
 
 /* Include the original Snowball header.h */

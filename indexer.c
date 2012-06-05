@@ -28,13 +28,23 @@ int dc_index(char *pathname)
     mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
     TSVectorParseState parser_state;
     struct SN_env *sn_env;
+    /* dictionary settings */
+    HASHCTL *info;
+    HTAB * dict;
     
 #ifdef DEBUG
     elog(NOTICE, "%s", "dc_index");
     elog(NOTICE, "PATH NAME: %s", pathname);
     elog(NOTICE, "PATH LEN: %d", (int) strlen(pathname));
 #endif
-
+    
+    /*
+     * initialize hash dictionary
+     */
+    info = (HASHCTL *) palloc(sizeof(HASHCTL));
+    dict = hash_create ("dict", 100000, info, 0);
+    
+    
     dir = AllocateDir(pathname);
     if (dir == NULL) {
         // TODO: use pgsql error reporting
@@ -49,9 +59,12 @@ int dc_index(char *pathname)
     while( (dirent = ReadDir(dir, pathname)) != NULL)
     {
         char *strval;
+        char *lower_strval;
         char *endptr;
         int   lenval;
         int   sz;
+        bool  found;
+        void *re;
         
 #ifdef DEBUG
         elog(NOTICE, "-FILE NAME: %s", dirent->d_name);
@@ -81,8 +94,9 @@ int dc_index(char *pathname)
         curr_file = PathNameOpenFile(sid_data_dir.data, O_RDONLY,  mode);
         sz = FileSeek(curr_file, 0, SEEK_END);
         FileSeek(curr_file, 0, SEEK_SET);
-        buffer = (char *) palloc(sizeof(char) * sz);
+        buffer = (char *) palloc(sizeof(char) * (sz + 1) );
         FileRead(curr_file, buffer, sz);
+        buffer[sz] = 0;
         
 #ifdef DEBUG
         elog(NOTICE, "-FILE SIZE: %d", sz);
@@ -102,14 +116,27 @@ int dc_index(char *pathname)
             elog(NOTICE, "--LENVAL: %d", lenval);
 #endif
             /*
-             * stemming
+             * 1. lower case
+             * 2. stemming
              */
+            lower_strval = lowerstr(strval);
             sn_env = english_ISO_8859_1_create_env();
-            SN_set_current(sn_env, lenval, strval);
+            SN_set_current(sn_env, lenval, lower_strval);
             english_ISO_8859_1_stem (sn_env);
             english_ISO_8859_1_close_env (sn_env);
             sn_env->p[sn_env->l] = 0;
-            elog(NOTICE, "english_ISO_8859_1_stem stems '%s' to '%s'", strval, sn_env->p);
+            elog(NOTICE, "english_ISO_8859_1_stem stems '%s' to '%s'", lower_strval, sn_env->p);
+            
+            /* search in the dictionary hash table to see if the entry already exists */
+            re = hash_search(dict, (void *) strval, HASH_FIND, &found);
+            if (found == TRUE)
+            {
+                elog(NOTICE, "HASH RV(FOUND): %s", (char *) re);
+            }
+            else
+            {
+                elog(NOTICE, "HASH RV(NOT): %s", (char *) re);
+            }
         }
         
         /*

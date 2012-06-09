@@ -29,7 +29,7 @@ int dc_index(char *pathname)
     TSVectorParseState parser_state;
     struct SN_env *sn_env;
     /* dictionary settings */
-    HASHCTL *info;
+    HASHCTL info;
     HTAB * dict;
     
 #ifdef DEBUG
@@ -41,8 +41,9 @@ int dc_index(char *pathname)
     /*
      * initialize hash dictionary
      */
-    info = (HASHCTL *) palloc(sizeof(HASHCTL));
-    dict = hash_create ("dict", 100000, info, 0);
+    info.keysize = 100000;
+    info.entrysize = sizeof(DictionaryEntry);
+    dict = hash_create ("dict", 100, &info, HASH_ELEM);
     
     
     dir = AllocateDir(pathname);
@@ -64,7 +65,7 @@ int dc_index(char *pathname)
         int   lenval;
         int   sz;
         bool  found;
-        void *re;
+        DictionaryEntry *re;
         
 #ifdef DEBUG
         elog(NOTICE, "-FILE NAME: %s", dirent->d_name);
@@ -111,6 +112,7 @@ int dc_index(char *pathname)
         parser_state = init_tsvector_parser(buffer, true, false);
         while (gettoken_tsvector(parser_state, &strval, &lenval, NULL, NULL, &endptr) == true)
         {
+            PostingEntry *p_entry;
 #ifdef DEBUG
             elog(NOTICE, "--TOKEN: %s", strval);
             elog(NOTICE, "--LENVAL: %d", lenval);
@@ -128,14 +130,22 @@ int dc_index(char *pathname)
             elog(NOTICE, "english_ISO_8859_1_stem stems '%s' to '%s'", lower_strval, sn_env->p);
             
             /* search in the dictionary hash table to see if the entry already exists */
-            re = hash_search(dict, (void *) strval, HASH_FIND, &found);
+            re = (DictionaryEntry *) hash_search(dict, (void *) strval, HASH_ENTER, &found);
             if (found == TRUE)
             {
-                elog(NOTICE, "HASH RV(FOUND): %s", (char *) re);
+                elog(NOTICE, "HASH RV(FOUND): %s", (char *) re->key);
+                p_entry = (PostingEntry *) palloc(sizeof(PostingEntry));
+                p_entry->doc_id = 1;
+                re->plist = lappend(re->plist, p_entry);
+                elog(NOTICE, "SIZE: %d", list_length(re->plist));
             }
             else
             {
-                elog(NOTICE, "HASH RV(NOT): %s", (char *) re);
+                elog(NOTICE, "HASH RV(NOT): %s", (char *) re->key);
+                p_entry = (PostingEntry *) palloc(sizeof(PostingEntry));
+                p_entry->doc_id = 1;
+                re->plist = list_make1(p_entry);
+                elog(NOTICE, "SIZE: %d", list_length(re->plist));
             }
         }
         

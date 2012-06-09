@@ -34,6 +34,7 @@
 #include "utils/builtins.h"
 #include "utils/hsearch.h" /* hashtable */
 #include "tsearch/ts_locale.h" /* lower str */
+#include "nodes/pg_list.h" /* linked list api */
 
 
 /* Include the original Snowball header.h */
@@ -70,7 +71,16 @@
 #include "snowball/libstemmer/stem_UTF_8_swedish.h"
 #include "snowball/libstemmer/stem_UTF_8_turkish.h"
 
+typedef struct PostingEntry
+{
+    int doc_id;
+} PostingEntry;
 
+typedef struct DictionaryEntry
+{
+	char		key[100];
+	List        *plist; /* postings list of document ids */
+} DictionaryEntry;
 
 
 int dc_index(char* pathname);

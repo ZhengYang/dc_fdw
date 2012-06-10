@@ -131,19 +131,27 @@ int dc_index(char *pathname)
             
             /* search in the dictionary hash table to see if the entry already exists */
             re = (DictionaryEntry *) hash_search(dict, (void *) strval, HASH_ENTER, &found);
-            if (found == TRUE)
+            if (found == TRUE) // term appears in the dictionary
             {
                 elog(NOTICE, "HASH RV(FOUND): %s", (char *) re->key);
-                p_entry = (PostingEntry *) palloc(sizeof(PostingEntry));
-                p_entry->doc_id = 1;
-                re->plist = lappend(re->plist, p_entry);
+                // already in the postings list
+                if ( atoi(llast(re->plist)) == atoi(sid_data_dir.data) )
+                {
+                    // do nothing
+                }
+                // not in the postings list
+                else {
+                    p_entry = (PostingEntry *) palloc(sizeof(PostingEntry));
+                    p_entry->doc_id = atoi(sid_data_dir.data);
+                    re->plist = lappend(re->plist, p_entry);
+                }
                 elog(NOTICE, "SIZE: %d", list_length(re->plist));
             }
-            else
+            else // term first appearing in the dictionary
             {
                 elog(NOTICE, "HASH RV(NOT): %s", (char *) re->key);
                 p_entry = (PostingEntry *) palloc(sizeof(PostingEntry));
-                p_entry->doc_id = 1;
+                p_entry->doc_id = atoi(sid_data_dir.data);
                 re->plist = list_make1(p_entry);
                 elog(NOTICE, "SIZE: %d", list_length(re->plist));
             }
@@ -163,7 +171,6 @@ int dc_index(char *pathname)
          * document collection size counter
          */
         num_of_files ++;
-        break;
     }
     
 #ifdef DEBUG

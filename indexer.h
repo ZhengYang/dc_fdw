@@ -31,7 +31,9 @@
 
 #include "tsearch/ts_locale.h"
 #include "tsearch/ts_public.h"
-#include "utils/builtins.h"
+#include "tsearch/ts_cache.h"
+#include "tsearch/ts_type.h"
+#include "utils/builtins.h" /* cstring_to_text */
 #include "utils/hsearch.h" /* hashtable */
 #include "tsearch/ts_locale.h" /* lower str */
 #include "nodes/pg_list.h" /* linked list api */
@@ -83,6 +85,6 @@ typedef struct DictionaryEntry
 } DictionaryEntry;
 
 
-int dc_index(char* pathname);
+int dc_index(char *datapath, char *indexpath);
 
 #endif   /* INDEXER_H */

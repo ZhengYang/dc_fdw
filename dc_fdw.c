@@ -268,7 +268,7 @@ dc_fdw_validator(PG_FUNCTION_ARGS)
 	if (catalog == ForeignTableRelationId) {
 	    elog(NOTICE, "%s", "Creating Foreign Table...");
 	    elog(NOTICE, "%s", "Start indexing document collection...");
-	    dc_index(data_dir);
+	    dc_index(data_dir, index_dir);
 	}
     
     

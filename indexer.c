@@ -17,25 +17,31 @@
  
 #include "indexer.h"
 
-int dc_index(char *pathname)
+int dc_index(char *datapath, char *indexpath)
 {
     DIR *dir;
     struct dirent *dirent;
     int num_of_files = 0;
     char *buffer;
     StringInfoData sid_data_dir;
+    StringInfoData sid_dict_dir;
+    StringInfoData sid_post_dir;
     File curr_file;
+    File dict_file;
+    File post_file;
     mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
-    TSVectorParseState parser_state;
-    struct SN_env *sn_env;
     /* dictionary settings */
     HASHCTL info;
     HTAB * dict;
+    HASH_SEQ_STATUS status;
+    DictionaryEntry *d_entry;
+    /* index file cursors */
+    int cursor;
     
 #ifdef DEBUG
     elog(NOTICE, "%s", "dc_index");
-    elog(NOTICE, "PATH NAME: %s", pathname);
-    elog(NOTICE, "PATH LEN: %d", (int) strlen(pathname));
+    elog(NOTICE, "PATH NAME: %s", datapath);
+    elog(NOTICE, "PATH LEN: %d", (int) strlen(datapath));
 #endif
     
     /*
@@ -46,7 +52,7 @@ int dc_index(char *pathname)
     dict = hash_create ("dict", 100, &info, HASH_ELEM);
     
     
-    dir = AllocateDir(pathname);
+    dir = AllocateDir(datapath);
     if (dir == NULL) {
         // TODO: use pgsql error reporting
         elog(NOTICE, "ERROR: Path not found!");
@@ -57,15 +63,16 @@ int dc_index(char *pathname)
      * Loop through data dir to read each of the files in the dir
      * and tokenize the content of the files.
      */
-    while( (dirent = ReadDir(dir, pathname)) != NULL)
+    while( (dirent = ReadDir(dir, datapath)) != NULL)
     {
-        char *strval;
-        char *lower_strval;
-        char *endptr;
-        int   lenval;
         int   sz;
         bool  found;
         DictionaryEntry *re;
+        Oid  cfgId;
+        TSVector tsvector;
+        int o;
+        char *lexemesptr;
+        WordEntry *curentryptr;
         
 #ifdef DEBUG
         elog(NOTICE, "-FILE NAME: %s", dirent->d_name);
@@ -79,7 +86,7 @@ int dc_index(char *pathname)
         if (strcmp(".", dirent->d_name) == 0) continue;
         if (strcmp("..", dirent->d_name) == 0) continue;
         initStringInfo(&sid_data_dir);
-        appendStringInfo(&sid_data_dir, "%s/%s", pathname, dirent->d_name);
+        appendStringInfo(&sid_data_dir, "%s/%s", datapath, dirent->d_name);
 
 #ifdef DEBUG
         elog(NOTICE, "-FILE PATH NAME: %s", sid_data_dir.data);
@@ -100,71 +107,81 @@ int dc_index(char *pathname)
         buffer[sz] = 0;
         
 #ifdef DEBUG
-        elog(NOTICE, "-FILE SIZE: %d", sz);
-        elog(NOTICE, "-FILE CONTENT: \n%s", buffer);
+        //elog(NOTICE, "-FILE SIZE: %d", sz);
+        //elog(NOTICE, "-FILE CONTENT: \n%s", buffer);
 #endif
         
         /*
          * tokenization:
-         * 1. init tokenizer
-         * 2. process one token at a time
+         * 1. Parse current document into a TSVector
+         * 2. Iterate the WordEntries in TSVector and add them into global Dictionary
          */
-        parser_state = init_tsvector_parser(buffer, true, false);
-        while (gettoken_tsvector(parser_state, &strval, &lenval, NULL, NULL, &endptr) == true)
-        {
+        cfgId = getTSCurrentConfig(true);
+        tsvector = (TSVector) DirectFunctionCall1( to_tsvector, PointerGetDatum(cstring_to_text(buffer)) );
+        lexemesptr = STRPTR(tsvector);
+        curentryptr = ARRPTR(tsvector);
+        for (o = 0; o < tsvector->size; o++) {
+            StringInfoData str;
             PostingEntry *p_entry;
-#ifdef DEBUG
-            elog(NOTICE, "--TOKEN: %s", strval);
-            elog(NOTICE, "--LENVAL: %d", lenval);
-#endif
-            /*
-             * 1. lower case
-             * 2. stemming
-             */
-            lower_strval = lowerstr(strval);
-            sn_env = english_ISO_8859_1_create_env();
-            SN_set_current(sn_env, lenval, lower_strval);
-            english_ISO_8859_1_stem (sn_env);
-            english_ISO_8859_1_close_env (sn_env);
-            sn_env->p[sn_env->l] = 0;
-            elog(NOTICE, "english_ISO_8859_1_stem stems '%s' to '%s'", lower_strval, sn_env->p);
             
+            initStringInfo (&str);
+            appendBinaryStringInfo (&str, lexemesptr + curentryptr->pos, curentryptr->len);
+#ifdef DEBUG
+            //elog(NOTICE, "--TOKEN: %s", str.data);
+#endif
+                  
             /* search in the dictionary hash table to see if the entry already exists */
-            re = (DictionaryEntry *) hash_search(dict, (void *) strval, HASH_ENTER, &found);
+            re = (DictionaryEntry *) hash_search(dict, (void *) str.data, HASH_ENTER, &found);
             if (found == TRUE) // term appears in the dictionary
             {
-                elog(NOTICE, "HASH RV(FOUND): %s", (char *) re->key);
+                PostingEntry *last_entry;
+
+                last_entry = (PostingEntry *) llast(re->plist);
+#ifdef DEBUG
+                //elog(NOTICE, "last_entry: %d, current_doc: %d", last_entry->doc_id, atoi(dirent->d_name) );
+#endif
+
                 // already in the postings list
-                if ( atoi(llast(re->plist)) == atoi(sid_data_dir.data) )
+                if ( last_entry->doc_id == atoi(dirent->d_name) )
                 {
                     // do nothing
+                    elog(NOTICE, "do nothing");
                 }
                 // not in the postings list
                 else {
                     p_entry = (PostingEntry *) palloc(sizeof(PostingEntry));
-                    p_entry->doc_id = atoi(sid_data_dir.data);
+                    p_entry->doc_id = atoi(dirent->d_name);
                     re->plist = lappend(re->plist, p_entry);
                 }
-                elog(NOTICE, "SIZE: %d", list_length(re->plist));
+#ifdef DEBUG
+                //elog(NOTICE, "HASH RV(FOUND): %s", (char *) re->key);
+                //elog(NOTICE, "SIZE: %d", list_length(re->plist));
+#endif
+                
             }
             else // term first appearing in the dictionary
             {
-                elog(NOTICE, "HASH RV(NOT): %s", (char *) re->key);
+                
                 p_entry = (PostingEntry *) palloc(sizeof(PostingEntry));
-                p_entry->doc_id = atoi(sid_data_dir.data);
+                p_entry->doc_id = atoi(dirent->d_name);
                 re->plist = list_make1(p_entry);
-                elog(NOTICE, "SIZE: %d", list_length(re->plist));
+#ifdef DEBUG
+                //elog(NOTICE, "HASH RV(NOT): %s", (char *) re->key);
+                //elog(NOTICE, "SIZE: %d", list_length(re->plist));
+#endif
+                
             }
+            curentryptr ++;
         }
-        
+
         /*
          *  Clean-up:
          *  1. close paser handle
          *  2. free buffer memory
          *  3. close file
          */
-        close_tsvector_parser(parser_state);
         pfree(buffer);
+        pfree(tsvector);
         FileClose(curr_file);
         
         /*
@@ -176,6 +193,57 @@ int dc_index(char *pathname)
 #ifdef DEBUG
     elog(NOTICE, "NUM OF FILES: %d", num_of_files);
 #endif
+
+    /* Dumping hashtable into index file */
+    initStringInfo(&sid_dict_dir);
+    initStringInfo(&sid_post_dir);
+    
+    appendStringInfo(&sid_dict_dir, "%s/dictionary", indexpath);
+    appendStringInfo(&sid_post_dir, "%s/postings", indexpath);
+#ifdef DEBUG
+        elog(NOTICE, "INDEX FILE NAME: %s", sid_dict_dir.data);
+        elog(NOTICE, "INDEX FILE NAME: %s", sid_post_dir.data);
+#endif
+    dict_file = PathNameOpenFile(sid_dict_dir.data, O_RDWR | O_CREAT,  0666);
+    post_file = PathNameOpenFile(sid_post_dir.data, O_RDWR | O_CREAT,  0666);
+    
+    /* iterate keys */
+    hash_seq_init(&status, dict);
+    cursor = 0;
+    while ((d_entry = (DictionaryEntry *) hash_seq_search(&status)) != NULL)
+	{
+	    ListCell   *cell;
+        StringInfoData sid_plist_line;
+        StringInfoData sid_dict_line;
+
+#ifdef DEBUG	    
+        elog(NOTICE, "%s", d_entry->key);
+#endif
+        /* write dict entry */
+        initStringInfo(&sid_dict_line);
+        appendStringInfo(&sid_dict_line, "%s %d\n", d_entry->key, cursor);
+        FileWrite (dict_file, sid_dict_line.data, strlen(sid_dict_line.data));		
+        
+        /* write postings list */
+        initStringInfo(&sid_plist_line);
+        /* serialize the list into a string of integers */
+	    foreach(cell, d_entry->plist)
+	    {
+	        PostingEntry *p_entry;
+            p_entry = (PostingEntry *) lfirst(cell);
+            appendStringInfo(&sid_plist_line, "%d ", p_entry->doc_id);
+	    }
+        FileWrite (post_file, sid_plist_line.data, strlen(sid_plist_line.data));
+        cursor += strlen(sid_plist_line.data);
+	    
+#ifdef DEBUG
+        elog(NOTICE, "%s", sid_plist_line.data);
+#endif
+
+	}
+    
+    FileClose(dict_file);
+    FileClose(post_file);
     FreeDir(dir);
     return 0;
 }

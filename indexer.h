@@ -86,5 +86,6 @@ typedef struct DictionaryEntry
 
 
 int dc_index(char *datapath, char *indexpath);
+int cmpPostingEntries(const void *p1, const void *p2);
 
 #endif   /* INDEXER_H */

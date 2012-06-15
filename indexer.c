@@ -17,6 +17,15 @@
  
 #include "indexer.h"
 
+int cmpPostingEntries(const void *p1, const void *p2) {
+    int p1_docid;
+    int p2_docid;
+    
+    p1_docid = ((PostingEntry *) p1)->doc_id;
+    p2_docid = ((PostingEntry *) p2)->doc_id;
+    return p1_docid - p2_docid;
+}
+
 int dc_index(char *datapath, char *indexpath)
 {
     DIR *dir;
@@ -215,6 +224,8 @@ int dc_index(char *datapath, char *indexpath)
 	    ListCell   *cell;
         StringInfoData sid_plist_line;
         StringInfoData sid_dict_line;
+        PostingEntry *slist;
+        PostingEntry *slist_curr;
 
 #ifdef DEBUG	    
         elog(NOTICE, "%s", d_entry->key);
@@ -224,14 +235,23 @@ int dc_index(char *datapath, char *indexpath)
         appendStringInfo(&sid_dict_line, "%s %d\n", d_entry->key, cursor);
         FileWrite (dict_file, sid_dict_line.data, strlen(sid_dict_line.data));		
         
+        /* sort postings list by doc_id */
+        slist = (PostingEntry *) palloc(list_length(d_entry->plist) * sizeof(PostingEntry));
+        slist_curr = slist;
+        foreach(cell, d_entry->plist)
+        {
+            PostingEntry *p_entry;
+            p_entry = (PostingEntry *) lfirst(cell);
+            slist_curr->doc_id = p_entry->doc_id;
+            slist_curr ++;
+        }
+        qsort((void *) slist, list_length(d_entry->plist), sizeof(PostingEntry), cmpPostingEntries);
+        
         /* write postings list */
         initStringInfo(&sid_plist_line);
         /* serialize the list into a string of integers */
-	    foreach(cell, d_entry->plist)
-	    {
-	        PostingEntry *p_entry;
-            p_entry = (PostingEntry *) lfirst(cell);
-            appendStringInfo(&sid_plist_line, "%d ", p_entry->doc_id);
+        for (slist_curr = slist; slist_curr < slist + list_length(d_entry->plist); slist_curr ++) {
+            appendStringInfo(&sid_plist_line, "%d ", slist_curr->doc_id);
 	    }
         FileWrite (post_file, sid_plist_line.data, strlen(sid_plist_line.data));
         cursor += strlen(sid_plist_line.data);
@@ -239,7 +259,7 @@ int dc_index(char *datapath, char *indexpath)
 #ifdef DEBUG
         elog(NOTICE, "%s", sid_plist_line.data);
 #endif
-
+        pfree(slist);
 	}
     
     FileClose(dict_file);

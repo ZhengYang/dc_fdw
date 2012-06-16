@@ -35,7 +35,8 @@
 #include "miscadmin.h"
 #include "optimizer/cost.h"
 
-#include "indexer.h"
+#include "dc_indexer.h"
+#include "dc_searcher.h"
 
 PG_MODULE_MAGIC;
 
@@ -76,8 +77,8 @@ static struct DcFdwOption valid_options[] = {
 typedef struct DcFdwExecutionState
 {
 	char	   *data_dir;		    /* dc to read */
-	List	   *options;		/* merged COPY options, excluding data_dir */
-	CopyState	cstate;			/* state of reading dc */
+    DIR        *dir_state;
+    AttInMetadata *attinmeta;
 } DcFdwExecutionState;
 
 /*
@@ -319,7 +320,7 @@ dcGetOptions(Oid foreigntableid,
 
 
 	/*
-	 * Extract options from FDW objects.  We ignore user mappings because
+	 * Extract options from FDW objects.  We ignore user mappings & server because
 	 * dc_fdw doesn't have any options that can be specified there.
 	 *
 	 * (XXX Actually, given the current contents of valid_options[], there's
@@ -347,6 +348,10 @@ dcGetOptions(Oid foreigntableid,
 	foreach(lc, options)
 	{
 		DefElem    *def = (DefElem *) lfirst(lc);
+		
+#ifdef DEBUG
+        elog(NOTICE, "<options> %s:%s", def->defname, defGetString(def));
+#endif
 
 		if (strcmp(def->defname, "data_dir") == 0)
 		{
@@ -378,7 +383,6 @@ dcGetOptions(Oid foreigntableid,
 	 */
 	if (*data_dir == NULL)
 		elog(ERROR, "data_dir is required for dc_fdw foreign tables");
-
 	*other_options = options;
 }
 
@@ -459,9 +463,13 @@ dcBeginForeignScan(ForeignScanState *node, int eflags)
     char       *language;
     char       *encoding;
 	List	   *options;
-	CopyState	cstate;
 	DcFdwExecutionState *festate;
+    //List       *qual_list;
+    //ListCell		*lc;
 
+#ifdef DEBUG
+    elog(NOTICE, "dcBeginForeignScan");
+#endif
 	/*
 	 * Do nothing in EXPLAIN (no ANALYZE) case.  node->fdw_state stays NULL.
 	 */
@@ -471,25 +479,41 @@ dcBeginForeignScan(ForeignScanState *node, int eflags)
 	/* Fetch options of foreign table */
 	dcGetOptions(RelationGetRelid(node->ss.ss_currentRelation),
 				   &data_dir, &index_dir, &language, &encoding, &options);
-
+	
+	/* Load dictionary into memory */
+	//dc_load_dict(index_dir);
+    elog(NOTICE, "%d", node->ss.ps.type);
+	
 	/*
-	 * Create CopyState from FDW options.  We always acquire all columns, so
-	 * as to match the expected ScanTupleSlot signature.
-	 */
-	cstate = BeginCopyFrom(node->ss.ss_currentRelation,
-						   data_dir,
-						   NIL,
-						   options);
-
+    foreach (lc, node->ss.ps.qual)
+    {
+        OpExpr	*op;
+        ExprState  *state = lfirst(lc);
+        Node	*left;
+        
+        if (IsA(state->expr, OpExpr))
+        {
+            OpExpr	*op = (OpExpr *) node;
+            if (list_length(op->args) == 2)
+                elog(NOTICE, "%s", "OK");
+            else
+                elog(NOTICE, "%s", "NOT OK");
+            left = list_nth(op->args, 0);
+        }
+        elog(NOTICE, "%d", state->type);
+        elog(NOTICE, "%d", state->expr->type);
+    }
+    */
 	/*
 	 * Save state in node->fdw_state.  We must save enough information to call
 	 * BeginCopyFrom() again.
 	 */
 	festate = (DcFdwExecutionState *) palloc(sizeof(DcFdwExecutionState));
 	festate->data_dir = data_dir;
-	festate->options = options;
-	festate->cstate = cstate;
-
+	festate->dir_state = AllocateDir(data_dir);;
+	/* Store the additional state info */
+    festate->attinmeta = TupleDescGetAttInMetadata(node->ss.ss_currentRelation->rd_att);
+	
 	node->fdw_state = (void *) festate;
 }
 
@@ -503,14 +527,39 @@ dcIterateForeignScan(ForeignScanState *node)
 {
 	DcFdwExecutionState *festate = (DcFdwExecutionState *) node->fdw_state;
 	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
-	bool		found;
-	ErrorContextCallback errcontext;
+	struct dirent *dirent;
+    List *tupleItemList;
+    
 
-	/* Set up callback to identify error line number. */
-	errcontext.callback = CopyFromErrorCallback;
-	errcontext.arg = (void *) festate->cstate;
-	errcontext.previous = error_context_stack;
-	error_context_stack = &errcontext;
+    while ( (dirent = ReadDir(festate->dir_state, festate->data_dir)) != NULL)
+    {
+        StringInfoData sid_data_dir;
+        mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+        File curr_file;
+        char *buffer;
+        int sz;
+        
+        /* skip . and .. */
+        if (strcmp(".", dirent->d_name) == 0) continue;
+        if (strcmp("..", dirent->d_name) == 0) continue;
+        
+        /* get full path/name of the file */
+        initStringInfo(&sid_data_dir);
+        appendStringInfo(&sid_data_dir, "%s/%s", festate->data_dir, dirent->d_name);
+        
+        /* read the content of the file */
+        curr_file = PathNameOpenFile(sid_data_dir.data, O_RDONLY,  mode);
+        sz = FileSeek(curr_file, 0, SEEK_END);
+        FileSeek(curr_file, 0, SEEK_SET);
+        buffer = (char *) palloc(sizeof(char) * (sz + 1) );
+        FileRead(curr_file, buffer, sz);
+        buffer[sz] = 0;
+        
+        tupleItemList = list_make3(dirent->d_name, dirent->d_name, buffer);  
+        
+        /* only get 1 entry */
+        break;
+    }
 
 	/*
 	 * The protocol for loading a virtual tuple into a slot is first
@@ -524,15 +573,22 @@ dcIterateForeignScan(ForeignScanState *node)
 	 * We can also pass tupleOid = NULL because we don't allow oids for
 	 * foreign tables.
 	 */
-	ExecClearTuple(slot);
-	found = NextCopyFrom(festate->cstate, NULL,
-						 slot->tts_values, slot->tts_isnull,
-						 NULL);
-	if (found)
-		ExecStoreVirtualTuple(slot);
+    ExecClearTuple(slot);
+	if (dirent != NULL)
+	{
+	    char **values;
+        HeapTuple tuple;
+        int i;
 
-	/* Remove error callback. */
-	error_context_stack = errcontext.previous;
+        values = (char **) palloc(sizeof(char *) * 3);
+        for (i = 0; i < 3; i++)
+        {
+            values[i] = list_nth(tupleItemList, i);
+        }
+
+        tuple = BuildTupleFromCStrings(festate->attinmeta, values);
+        ExecStoreTuple(tuple, slot, InvalidBuffer, FALSE);
+	}
 
 	return slot;
 }
@@ -551,8 +607,8 @@ dcEndForeignScan(ForeignScanState *node)
 #endif
 
 	/* if festate is NULL, we are in EXPLAIN; nothing to do */
-	if (festate)
-		EndCopyFrom(festate->cstate);
+	//if (festate)
+	//	EndCopyFrom(festate->cstate);
 }
 
 /*

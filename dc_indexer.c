@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * indexer.c
+ * dc_indexer.c
  *		  indexer for document collections foreign-data wrapper.
  *
  * Copyright (c) 2012, PostgreSQL Global Development Group
@@ -10,12 +10,12 @@
  * Author: Zheng Yang <zhengyang4k@gmail.com>
  *
  * IDENTIFICATION
- *		  contrib/dc_fdw/indexer.c
+ *		  contrib/dc_fdw/dc_indexer.c
  *
  *-------------------------------------------------------------------------
  */
  
-#include "indexer.h"
+#include "dc_indexer.h"
 
 int cmpPostingEntries(const void *p1, const void *p2) {
     int p1_docid;
@@ -94,6 +94,7 @@ int dc_index(char *datapath, char *indexpath)
          */
         if (strcmp(".", dirent->d_name) == 0) continue;
         if (strcmp("..", dirent->d_name) == 0) continue;
+        
         initStringInfo(&sid_data_dir);
         appendStringInfo(&sid_data_dir, "%s/%s", datapath, dirent->d_name);
 

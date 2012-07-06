@@ -30,14 +30,16 @@ int dc_index(char *datapath, char *indexpath)
 {
     DIR *dir;
     struct dirent *dirent;
-    int num_of_files = 0;
     char *buffer;
     StringInfoData sid_data_dir;
     StringInfoData sid_dict_dir;
     StringInfoData sid_post_dir;
+    StringInfoData sid_stat_dir;
     File curr_file;
     File dict_file;
     File post_file;
+    File stat_file;
+    StringInfoData sid_stat_line;
     mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
     /* dictionary settings */
     HASHCTL info;
@@ -46,6 +48,9 @@ int dc_index(char *datapath, char *indexpath)
     DictionaryEntry *d_entry;
     /* index file cursors */
     int cursor;
+    /* stats and of dc */
+    int num_of_files = 0;
+    int num_of_bytes = 0;
     
 #ifdef DEBUG
     elog(NOTICE, "%s", "dc_index");
@@ -108,6 +113,7 @@ int dc_index(char *datapath, char *indexpath)
          * 2. seek to the end and get the length of the file
          * 3. rewind to the begining for reading
          * 4. read file content into buffer
+         * 5. increase the size of total bytes in dc
          */
         curr_file = PathNameOpenFile(sid_data_dir.data, O_RDONLY,  mode);
         sz = FileSeek(curr_file, 0, SEEK_END);
@@ -115,6 +121,7 @@ int dc_index(char *datapath, char *indexpath)
         buffer = (char *) palloc(sizeof(char) * (sz + 1) );
         FileRead(curr_file, buffer, sz);
         buffer[sz] = 0;
+        num_of_bytes += sz;
         
 #ifdef DEBUG
         //elog(NOTICE, "-FILE SIZE: %d", sz);
@@ -266,5 +273,27 @@ int dc_index(char *datapath, char *indexpath)
     FileClose(dict_file);
     FileClose(post_file);
     FreeDir(dir);
+    
+    /*
+     * collection stats information
+     */
+    initStringInfo(&sid_stat_dir);
+    appendStringInfo(&sid_stat_dir, "%s/stats", indexpath);
+#ifdef DEBUG
+        elog(NOTICE, "STATS FILE NAME: %s", sid_stat_dir.data);
+#endif
+    stat_file = PathNameOpenFile(sid_stat_dir.data, O_RDWR | O_CREAT,  0666);
+    
+    /* number of documents in the doc collection */
+    initStringInfo(&sid_stat_line);
+    appendStringInfo(&sid_stat_line, "NUM_OF_DOCS:%d\n", num_of_files);
+    FileWrite (stat_file, sid_stat_line.data, strlen(sid_stat_line.data));
+    
+    /* number of bytes in the doc collection */
+    resetStringInfo(&sid_stat_line);
+    appendStringInfo(&sid_stat_line, "NUM_OF_BYTES:%d", num_of_bytes);
+    FileWrite (stat_file, sid_stat_line.data, strlen(sid_stat_line.data));
+    
+    FileClose(stat_file);	
     return 0;
 }

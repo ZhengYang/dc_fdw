@@ -467,6 +467,12 @@ dcGetForeignRelSize(PlannerInfo *root,
 					  Oid foreigntableid)
 {
 	DcFdwPlanState *fdw_private;
+    int num_of_docs;
+    int num_of_bytes;
+    
+#ifdef DEBUG
+    elog(NOTICE, "dcGetForeignRelSize");
+#endif
 
 	/*
 	 * Fetch options.  We only need filename at this point, but we might as
@@ -480,7 +486,10 @@ dcGetForeignRelSize(PlannerInfo *root,
 	baserel->fdw_private = (void *) fdw_private;
 
 	/* Estimate relation size */
-	estimate_size(root, baserel, fdw_private);
+    dc_load_stat(fdw_private->index_dir, &num_of_docs, &num_of_bytes);
+    baserel->rows = (double) num_of_docs;
+    elog(NOTICE, "NUM OF DOCS: %f", baserel->rows);
+	//estimate_size(root, baserel, fdw_private);
 }
 
 /*
@@ -499,6 +508,10 @@ dcGetForeignPaths(PlannerInfo *root,
 	DcFdwPlanState *fdw_private = (DcFdwPlanState *) baserel->fdw_private;
 	Cost		startup_cost;
 	Cost		total_cost;
+
+#ifdef DEBUG
+    elog(NOTICE, "dcGetForeignPaths");
+#endif
 
 	/* Estimate costs */
 	estimate_costs(root, baserel, fdw_private,
@@ -534,6 +547,11 @@ dcGetForeignPlan(PlannerInfo *root,
 				   List *scan_clauses)
 {
 	Index		scan_relid = baserel->relid;
+
+#ifdef DEBUG
+    elog(NOTICE, "dcGetForeignPlan");
+#endif
+
 
 	/*
 	 * We have no native ability to evaluate restriction clauses, so we just
@@ -813,9 +831,9 @@ static void
 estimate_size(PlannerInfo *root, RelOptInfo *baserel,
 			  DcFdwPlanState *fdw_private)
 {
-
-	/* Save the output-rows estimate for the planner */
+	/* Open stats file and Save the output-rows estimate for the planner */
 	baserel->rows = 7000;
+    elog(NOTICE, "TP: %d", baserel->tuples);
 }
 
 

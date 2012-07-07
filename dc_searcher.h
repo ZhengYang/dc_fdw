@@ -16,3 +16,4 @@
  */
  
 int dc_load_dict(char *indexpath);
+int dc_load_stat(char *indexpath, int *num_of_docs, int *num_of_bytes);

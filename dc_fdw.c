@@ -85,7 +85,8 @@ typedef struct DcFdwPlanState
     char        *encoding;      /* encoding of the documents */
     List        *options;
 	BlockNumber pages;			/* estimate of file's physical size */
-	double		ndocs;		    /* estimate of number of rows in file */
+    int         dc_size;        /* collection size in bytes */
+	int		    ndocs;		    /* estimate of number of rows in file */
 } DcFdwPlanState;
 
 
@@ -97,6 +98,8 @@ typedef struct DcFdwExecutionState
 	char	   *data_dir;		    /* dc to read */
     DIR        *dir_state;
     AttInMetadata *attinmeta;
+    int         dc_size;        /* collection size in bytes */
+	int		    ndocs;		    /* estimate of number of rows in file */
 } DcFdwExecutionState;
 
 /*
@@ -489,6 +492,8 @@ dcGetForeignRelSize(PlannerInfo *root,
     dc_load_stat(fdw_private->index_dir, &num_of_docs, &num_of_bytes);
     baserel->rows = (double) num_of_docs;
     elog(NOTICE, "NUM OF DOCS: %f", baserel->rows);
+    fdw_private->dc_size = num_of_bytes;
+    fdw_private->ndocs = num_of_docs;
 	//estimate_size(root, baserel, fdw_private);
 }
 
@@ -583,6 +588,10 @@ dcExplainForeignScan(ForeignScanState *node, ExplainState *es)
     char       *language;
     char       *encoding;
 	List	   *options;
+	DcFdwExecutionState	   *fdw_private;
+	char	   *sql;
+	int         num_of_docs;
+    int         num_of_bytes;
 
 #ifdef DEBUG
     elog(NOTICE, "dcExplainForeignScan");
@@ -592,18 +601,20 @@ dcExplainForeignScan(ForeignScanState *node, ExplainState *es)
 	/* Fetch options --- we only need data_dir at this point */
 	dcGetOptions(RelationGetRelid(node->ss.ss_currentRelation),
 				   &data_dir, &index_dir, &language, &encoding, &options);
-
+	/* load stats */
+	dc_load_stat(index_dir, &num_of_docs, &num_of_bytes);
 	ExplainPropertyText("Foreign Document Collection", data_dir, es);
-
+	
+	//sql = strVal(list_nth(fdw_private, 1));
+	//ExplainPropertyText("Remote SQL", sql, es);
+	
 	/* Suppress dc size if we're not showing cost details */
-	if (es->costs)
-	{
-		struct stat stat_buf;
-
-		if (stat(data_dir, &stat_buf) == 0)
-			ExplainPropertyLong("Foreign Document Collection Size", (long) stat_buf.st_size,
-								es);
-	}
+	ExplainPropertyLong("Foreign Document Collection Size", (long) num_of_bytes, es);
+	ExplainPropertyLong("Number of Documents", (long) num_of_docs, es);
+	//if (es->costs)
+	//{
+		
+	//}
 }
 
 /*
@@ -619,6 +630,8 @@ dcBeginForeignScan(ForeignScanState *node, int eflags)
     char       *encoding;
 	List	   *options;
 	DcFdwExecutionState *festate;
+    int         num_of_docs;
+    int         num_of_bytes;
     //List       *qual_list;
     //ListCell		*lc;
 
@@ -659,16 +672,19 @@ dcBeginForeignScan(ForeignScanState *node, int eflags)
         elog(NOTICE, "%d", state->expr->type);
     }
     */
+    dc_load_stat(index_dir, &num_of_docs, &num_of_bytes);
 	/*
 	 * Save state in node->fdw_state.  We must save enough information to call
 	 * BeginCopyFrom() again.
 	 */
 	festate = (DcFdwExecutionState *) palloc(sizeof(DcFdwExecutionState));
 	festate->data_dir = data_dir;
-	festate->dir_state = AllocateDir(data_dir);;
+	festate->dir_state = AllocateDir(data_dir);
+	festate->dc_size = num_of_bytes;        /* collection size in bytes */
+	festate->ndocs = num_of_docs;		    /* estimate of number of rows in file */
 	/* Store the additional state info */
     festate->attinmeta = TupleDescGetAttInMetadata(node->ss.ss_currentRelation->rd_att);
-	
+    
 	node->fdw_state = (void *) festate;
 }
 

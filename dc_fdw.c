@@ -38,9 +38,11 @@
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
 #include "utils/rel.h"
+#include "optimizer/var.h"
 
 #include "dc_indexer.h"
 #include "dc_searcher.h"
+#include "deparse.h"
 
 PG_MODULE_MAGIC;
 
@@ -513,6 +515,12 @@ dcGetForeignPaths(PlannerInfo *root,
 	DcFdwPlanState *fdw_private = (DcFdwPlanState *) baserel->fdw_private;
 	Cost		startup_cost;
 	Cost		total_cost;
+	
+	List		   *remote_conds = NIL;
+	List		   *param_conds = NIL;
+	List		   *local_conds = NIL;
+	
+    StringInfo buf;
 
 #ifdef DEBUG
     elog(NOTICE, "dcGetForeignPaths");
@@ -531,12 +539,18 @@ dcGetForeignPaths(PlannerInfo *root,
 									 NIL,		/* no pathkeys */
 									 NULL,		/* no outer rel either */
 									 NIL));		/* no fdw_private data */
-
+    //elog(NOTICE, "xixihaha: %s", nodeToString(baserel));
+    
 	/*
 	 * If data file was sorted, and we knew it somehow, we could insert
 	 * appropriate pathkeys into the ForeignPath node to tell the planner
 	 * that.
 	 */
+     buf = makeStringInfo();
+	 sortConditions(root, baserel, &remote_conds, &param_conds, &local_conds);
+	 if (list_length(remote_conds) > 0)
+	     appendWhereClause(buf, true, remote_conds, root);
+	 elog(NOTICE, "SHIN: %s", buf->data);
 }
 
 /*

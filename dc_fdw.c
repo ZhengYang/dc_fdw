@@ -519,8 +519,6 @@ dcGetForeignPaths(PlannerInfo *root,
 	List		   *remote_conds = NIL;
 	List		   *param_conds = NIL;
 	List		   *local_conds = NIL;
-	
-    StringInfo buf;
 
 #ifdef DEBUG
     elog(NOTICE, "dcGetForeignPaths");
@@ -546,11 +544,7 @@ dcGetForeignPaths(PlannerInfo *root,
 	 * appropriate pathkeys into the ForeignPath node to tell the planner
 	 * that.
 	 */
-     buf = makeStringInfo();
-	 sortConditions(root, baserel, &remote_conds, &param_conds, &local_conds);
-	 if (list_length(remote_conds) > 0)
-	     appendWhereClause(buf, true, remote_conds, root);
-	 elog(NOTICE, "SHIN: %s", buf->data);
+	 sort_quals(root, baserel);
 }
 
 /*

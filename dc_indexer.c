@@ -90,8 +90,12 @@ int dc_index(char *datapath, char *indexpath)
         
 #ifdef DEBUG
         elog(NOTICE, "-FILE NAME: %s", dirent->d_name);
+#ifdef _DIRENT_HAVE_D_NAMLEN
         elog(NOTICE, "-FILE NAME LEN: %d", dirent->d_namlen);
-#endif
+#else
+        elog(NOTICE, "-FILE NAME LEN: %d", strlen(dirent->d_name));
+#endif /* _DIRENT_HAVE_D_NAMLEN */
+#endif /* DEBUG */
         
         /* 
          * concat path and fname to full file name

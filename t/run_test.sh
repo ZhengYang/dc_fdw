@@ -21,6 +21,7 @@ psql -f setup.sql ${PSQL_OPTS} ${DBNAME}
 
 if [ -d ${TEST_ID} ]; then
   psql -f ${TEST_ID}/sql/setup.sql ${PSQL_OPTS} ${DBNAME}
+  mkdir -p /tmp/dc_fdw/t/${TEST_ID}/output
   psql -e -f ${TEST_ID}/sql/test.sql ${PSQL_OPTS} ${DBNAME} > /tmp/dc_fdw/t/${TEST_ID}/output/output.log
   psql -f ${TEST_ID}/sql/teardown.sql ${PSQL_OPTS} ${DBNAME}
 else

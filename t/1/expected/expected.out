@@ -1,14 +1,51 @@
+SELECT id,title FROM dc_table_1 WHERE content @@ 'Brazilian';
  id | title 
 ----+-------
  1  | 1
 (1 row)
 
+SELECT id,title FROM dc_table_1 WHERE content @@ 'brazilian';
  id | title 
 ----+-------
  1  | 1
 (1 row)
 
+SELECT id,title FROM dc_table_1 WHERE content @@ 'brazil';
  id | title 
 ----+-------
 (0 rows)
+
+SELECT id,title FROM dc_table_1 WHERE content @@ 'Cocoa';
+ id | title 
+----+-------
+ 1  | 1
+(1 row)
+
+SELECT id,title FROM dc_table_1 WHERE content @@ 'Chocolate';
+ id | title 
+----+-------
+(0 rows)
+
+SELECT id,title FROM dc_table_1 WHERE content @@ 'Brazilian' AND content @@ 'Cocoa';
+ id | title 
+----+-------
+ 1  | 1
+(1 row)
+
+SELECT id,title FROM dc_table_1 WHERE content @@ 'Brazilian' AND content @@ 'Chocolate';
+ id | title 
+----+-------
+(0 rows)
+
+SELECT id,title FROM dc_table_1 WHERE content @@ 'Brazilian' OR content @@ 'Cocoa';
+ id | title 
+----+-------
+ 1  | 1
+(1 row)
+
+SELECT id,title FROM dc_table_1 WHERE content @@ 'Brazilian' OR content @@ 'Chocolate';
+ id | title 
+----+-------
+ 1  | 1
+(1 row)
 

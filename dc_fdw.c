@@ -515,10 +515,7 @@ dcGetForeignPaths(PlannerInfo *root,
 	DcFdwPlanState *fdw_private = (DcFdwPlanState *) baserel->fdw_private;
 	Cost		startup_cost;
 	Cost		total_cost;
-	
-	List		   *remote_conds = NIL;
-	List		   *param_conds = NIL;
-	List		   *local_conds = NIL;
+    PushableQualNode *qualRoot;
 
 #ifdef DEBUG
     elog(NOTICE, "dcGetForeignPaths");
@@ -544,7 +541,10 @@ dcGetForeignPaths(PlannerInfo *root,
 	 * appropriate pathkeys into the ForeignPath node to tell the planner
 	 * that.
 	 */
-	 sort_quals(root, baserel);
+	
+    extractQuals(&qualRoot, root, baserel);
+    evalQual(qualRoot, 1);
+    pfree(qualRoot);
 }
 
 /*

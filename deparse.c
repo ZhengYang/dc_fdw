@@ -37,35 +37,56 @@
 
 #include "deparse.h"
 
-
 /*
- * Examine each element in the list baserestrictinfo of baserel, and sort them
- * into three groups: remote_conds contains conditions which can be evaluated
- *   - remote_conds is push-down safe, and don't contain any Param node
- *   - param_conds is push-down safe, but contain some Param node
- *   - local_conds is not push-down safe
- *
- * Only remote_conds can be used in remote EXPLAIN, and remote_conds and
- * param_conds can be used in final remote query.
+ * Examine each element in the list baserestrictinfo of baserel, and constrct
+ * a tree structure for utilizing the quals.
  */
-void
-sort_quals(PlannerInfo *root, RelOptInfo *baserel)
+int
+extractQuals(PushableQualNode **qualRoot, PlannerInfo *root, RelOptInfo *baserel)
 {
-	ListCell	   *lc;
-
+	ListCell    *lc;
+    int         pushableQualCounter = 0;
+    *qualRoot = (PushableQualNode *) palloc(sizeof(PushableQualNode));
+    
+	/*
+	 * Items in baserestrictinfo list are ANDed
+	 */
 	foreach(lc, baserel->baserestrictinfo)
 	{
-        PushableQual *qual = (PushableQual *) palloc(sizeof(PushableQual));
-		RestrictInfo *ri = (RestrictInfo *) lfirst(lc);
-		
-		elog(NOTICE, "NODE_TAG: %d", nodeTag(ri->clause));
+	    RestrictInfo *ri = (RestrictInfo *) lfirst(lc);
+	    
+	    elog(NOTICE, "NODE_TAG: %d", nodeTag(ri->clause));
 		elog(NOTICE, "NODE_STR: %s", nodeToString(ri->clause));
-        
-        if (deparseExpr(qual, ri->clause, root) == 0 )
-            elog(NOTICE, "QUAL: %s %s %s", qual->left.data, qual->opname.data, qual->right.data);
-        else
-            elog(NOTICE, "Unsupported quals encountered, ignore it!");
+	    
+	    /* check if we need to load qual into root */
+	    if (pushableQualCounter == 0)
+	    {
+	        /* 
+	         * try loading qual into root node of the tree
+             * if successful, increment counter
+             */
+	        if (deparseExpr(*qualRoot, ri->clause, root) == 0)
+	            pushableQualCounter ++;
+        }
+        /* construct ANDed tree structure and attach to tree node */
+	    else {
+	        PushableQualNode *qualCurr = (PushableQualNode *) palloc(sizeof(PushableQualNode));
+	        if (deparseExpr(qualCurr, ri->clause, root) == 0)
+	        {
+	            PushableQualNode *boolNode = (PushableQualNode *) palloc(sizeof(PushableQualNode));
+	            initStringInfo(&boolNode->opname);
+	            initStringInfo(&boolNode->optype);
+	            appendStringInfo(&boolNode->opname, "%s", "AND");
+	            appendStringInfo(&boolNode->optype, "%s", "bool_node");
+                boolNode->childNodes = lappend(boolNode->childNodes, *qualRoot);
+                boolNode->childNodes = lappend(boolNode->childNodes, qualCurr);
+                *qualRoot = boolNode;
+	        }
+	        else
+                continue;
+	    }
 	}
+    return pushableQualCounter;
 }
 
 
@@ -77,7 +98,7 @@ sort_quals(PlannerInfo *root, RelOptInfo *baserel)
  * foreign_expr_walker to avoid unsupported error..
  */
 int
-deparseExpr(PushableQual *qual, Expr *node, PlannerInfo *root)
+deparseExpr(PushableQualNode *qual, Expr *node, PlannerInfo *root)
 {
 	/*
 	 * This part must be match foreign_expr_walker.
@@ -90,12 +111,8 @@ deparseExpr(PushableQual *qual, Expr *node, PlannerInfo *root)
 			break;
 		case T_BoolExpr:
 		    elog(NOTICE, "T_BoolExpr");
-            return -1;//deparseBoolExpr(qual, (BoolExpr *) node, root);
+            return deparseBoolExpr(qual, (BoolExpr *) node, root);
 			break;
-		case T_FuncExpr:
-    		elog(NOTICE, "T_FuncExpr");
-            return -1;//deparseFuncExpr(qual, (FuncExpr *) node, root);
-    		break;
     	case T_OpExpr:
     	    elog(NOTICE, "T_OpExpr");
     		return deparseOpExpr(qual, (OpExpr *) node, root);
@@ -105,6 +122,10 @@ deparseExpr(PushableQual *qual, Expr *node, PlannerInfo *root)
 			return deparseVar(qual, (Var *) node, root);
     		break;
     	/* Unsupported quals */	
+    	case T_FuncExpr:
+        	elog(NOTICE, "T_FuncExpr: not pushable");
+            return -1;//deparseFuncExpr(qual, (FuncExpr *) node, root);
+        	break;
 		case T_NullTest:
 		    elog(NOTICE, "T_NullTest: not pushable");
             return -1;
@@ -150,7 +171,7 @@ deparseExpr(PushableQual *qual, Expr *node, PlannerInfo *root)
  * instead of attribute name.
  */
 int
-deparseVar(PushableQual *qual,
+deparseVar(PushableQualNode *qual,
 		   Var *node,
 		   PlannerInfo *root)
 {
@@ -191,11 +212,11 @@ deparseVar(PushableQual *qual,
 	if (colname == NULL)
 		colname = get_attname(rte->relid, node->varattno);
 
-	if (qual->left.len == 0 && 
-	    qual->right.len == 0 && 
+	if (qual->leftOperand.len == 0 && 
+	    qual->rightOperand.len == 0 && 
 	    strcmp(qual->opname.data, "@@") == 0)
 	{
-        appendStringInfo(&qual->left, "%s", colname);
+        appendStringInfo(&qual->leftOperand, "%s", colname);
         return 0;
 	}
 	else {
@@ -210,7 +231,7 @@ deparseVar(PushableQual *qual,
  * sync with get_const_expr.
  */
 int
-deparseConst(PushableQual *qual,
+deparseConst(PushableQualNode *qual,
 			 Const *node,
 			 PlannerInfo *root)
 {
@@ -227,8 +248,8 @@ deparseConst(PushableQual *qual,
 	
 	/* check if the qual is in good shape to be pushed down */
     if (strcmp(qual->opname.data, "@@") == 0 &&
-        qual->left.len != 0 &&
-        qual->right.len == 0)
+        qual->leftOperand.len != 0 &&
+        qual->rightOperand.len == 0)
     {
         getTypeOutputInfo(node->consttype,
     					  &typoutput, &typIsVarlena);
@@ -256,19 +277,19 @@ deparseConst(PushableQual *qual,
     				if (strspn(extval, "0123456789+-eE.") == strlen(extval))
     				{
     					if (extval[0] == '+' || extval[0] == '-')
-    						appendStringInfo(&qual->right, "%s", extval);
+    						appendStringInfo(&qual->rightOperand, "%s", extval);
     					else
-    						appendStringInfoString(&qual->right, extval);
+    						appendStringInfoString(&qual->rightOperand, extval);
     					if (strcspn(extval, "eE.") != strlen(extval))
     						isfloat = true;	/* it looks like a float */
     				}
     				else
-    					appendStringInfo(&qual->right, "'%s'", extval);
+    					appendStringInfo(&qual->rightOperand, "'%s'", extval);
     			}
     			break;
     		case BITOID:
     		case VARBITOID:
-    			appendStringInfo(&qual->right, "B'%s'", extval);
+    			appendStringInfo(&qual->rightOperand, "B'%s'", extval);
     			break;
     		default:
     			{
@@ -283,8 +304,8 @@ deparseConst(PushableQual *qual,
     					 * set to similar value as local session.
     					 */
     					if (SQL_STR_DOUBLE(ch, !standard_conforming_strings))
-    						appendStringInfoChar(&qual->right, ch);
-    					appendStringInfoChar(&qual->right, ch);
+    						appendStringInfoChar(&qual->rightOperand, ch);
+    					appendStringInfoChar(&qual->rightOperand, ch);
     				}
     			}
     			break;
@@ -297,43 +318,63 @@ deparseConst(PushableQual *qual,
     }
 }
 
-/*
 int
-deparseBoolExpr(StringInfo buf,
+deparseBoolExpr(PushableQualNode *qual,
 				BoolExpr *node,
 				PlannerInfo *root)
 {
 	ListCell   *lc;
-	char	   *op;
-	bool		first;
 
+    /* constrcut a bool op node as root for local subtree */
 	switch (node->boolop)
 	{
 		case AND_EXPR:
-			op = "AND";
+		    initStringInfo(&qual->opname);
+            initStringInfo(&qual->optype);
+            appendStringInfo(&qual->opname, "%s", "AND");
+            appendStringInfo(&qual->optype, "%s", "bool_node");
 			break;
 		case OR_EXPR:
-			op = "OR";
+		    initStringInfo(&qual->opname);
+            initStringInfo(&qual->optype);
+            appendStringInfo(&qual->opname, "%s", "OR");
+            appendStringInfo(&qual->optype, "%s", "bool_node");
 			break;
 		case NOT_EXPR:
-			appendStringInfo(buf, "(NOT ");
-			deparseExpr(buf, list_nth(node->args, 0), root);
-			appendStringInfo(buf, ")");
-			return;
+		    initStringInfo(&qual->opname);
+            initStringInfo(&qual->optype);
+            appendStringInfo(&qual->opname, "%s", "NOT");
+            appendStringInfo(&qual->optype, "%s", "bool_node");
+            break;
 	}
-
-	first = true;
-	appendStringInfo(buf, "(");
-	foreach(lc, node->args)
-	{
-		if (!first)
-			appendStringInfo(buf, " %s ", op);
-		deparseExpr(buf, (Expr *) lfirst(lc), root);
-		first = false;
-	}
-	appendStringInfo(buf, ")");
+	elog(NOTICE, "opname:%s", qual->opname.data);
+	
+    /* attach subtree node to the local root */
+    if (strcmp(qual->opname.data, "NOT") == 0)
+    {
+        PushableQualNode *subtree = (PushableQualNode *) palloc(sizeof(PushableQualNode));
+        if (deparseExpr(subtree, list_nth(node->args, 0), root) == 0)
+        {
+            qual->childNodes = lappend(qual->childNodes, subtree);
+        }
+        else
+            return -1;
+    }
+    /* AND'ed or OR'ed */
+    else {
+	    foreach(lc, node->args)
+	    {
+	        PushableQualNode *subtree = (PushableQualNode *) palloc(sizeof(PushableQualNode));
+    		if (deparseExpr(subtree, (Expr *) lfirst(lc), root) == 0)
+    		    qual->childNodes = lappend(qual->childNodes, subtree);
+    		else
+                return -1;
+	    }
+    }
+    return 0;
 }
-*/
+
+
 /*
  * Deparse given node which represents a function call into buf.  We treat only
  * explicit function call and explicit cast (coerce), because others are
@@ -344,7 +385,7 @@ deparseBoolExpr(StringInfo buf,
  */
  /*
 int
-deparseFuncExpr(StringInfo buf,
+deparseFuncExpr(PushableQualNode *qual,
 				FuncExpr *node,
 				PlannerInfo *root)
 {
@@ -385,13 +426,14 @@ deparseFuncExpr(StringInfo buf,
 	}
 }
 */
+
 /*
  * Deparse given operator expression into buf.  To avoid problems around
  * priority of operations, we always parenthesize the arguments.  Also we use
  * OPERATOR(schema.operator) notation to determine remote operator exactly.
  */
 int
-deparseOpExpr(PushableQual *qual,
+deparseOpExpr(PushableQualNode *qual,
 			  OpExpr *node,
 			  PlannerInfo *root)
 {
@@ -422,11 +464,12 @@ deparseOpExpr(PushableQual *qual,
         strcmp(opname, "@@") == 0 &&
         oprkind == 'b' )
     {
-        char    *opname;
         initStringInfo(&qual->opname);
         appendStringInfo(&qual->opname, "%s", "@@");
-        initStringInfo(&qual->left);
-        initStringInfo(&qual->right);
+        initStringInfo(&qual->optype);
+        appendStringInfo(&qual->optype, "%s", "op_node");
+        initStringInfo(&qual->leftOperand);
+        initStringInfo(&qual->rightOperand);
         
         arg = list_head(node->args);
         if (deparseExpr(qual, lfirst(arg), root) != 0)
@@ -438,4 +481,36 @@ deparseOpExpr(PushableQual *qual,
         elog(NOTICE, "OpExpr not supported!");
         return -1;
     }
+}
+
+void
+evalQual(PushableQualNode *qualRoot, int indentLevel)
+{
+    ListCell        *lc;
+    StringInfoData  indentStr;
+    int             i;
+    
+    initStringInfo(&indentStr);
+    
+    for (i=0; i<indentLevel; i++)
+        appendStringInfoChar(&indentStr, '-');
+    
+    /* op_node: @@ */
+    if (strcmp(qualRoot->optype.data, "op_node") == 0)
+    {
+        elog(NOTICE, "%s%s", indentStr.data, qualRoot->optype.data);
+        elog(NOTICE, "%s%s", indentStr.data, qualRoot->leftOperand.data);
+        elog(NOTICE, "%s%s", indentStr.data, qualRoot->opname.data);
+        elog(NOTICE, "%s%s", indentStr.data, qualRoot->rightOperand.data);
+    }
+    /* bool_node: AND, OR, NOT */
+    else {
+        elog(NOTICE, "%s%s", indentStr.data, qualRoot->optype.data);
+        elog(NOTICE, "%s%s", indentStr.data, qualRoot->opname.data);
+        elog(NOTICE, "%s%s", indentStr.data, "CHILDREN:");
+        foreach(lc, qualRoot->childNodes)
+        {
+            evalQual((PushableQualNode *) lfirst(lc), indentLevel + 1);
+        }
+    } 
 }

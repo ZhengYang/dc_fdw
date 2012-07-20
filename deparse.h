@@ -18,23 +18,34 @@
 #ifndef DC_DEPARSE_H
 #define DC_DEPARSE_H
 
-typedef struct PushableQual
+#include "postgres.h"
+#include "foreign/foreign.h"
+#include "nodes/relation.h"
+#include "utils/relcache.h"
+
+typedef struct PushableQualNode
 {
-    StringInfoData  left;
-    StringInfoData  opname;
-    StringInfoData  right;
-} PushableQual;
+    StringInfoData  opname; /* AND, OR, NOT if bool_node, '@@' else */
+    StringInfoData  optype; /* [bool_node, op_node] */
+    StringInfoData  leftOperand; /* for op_node only */
+    StringInfoData  rightOperand; /* for op_node only */
+    List            *childNodes; /* list of child PushableQualNodes */
+} PushableQualNode;
 
 /*
  * Get string representation which can be used in SQL statement from a node.
  */
-void sort_quals(PlannerInfo *root, RelOptInfo *baserel);
- 					
-int deparseExpr(PushableQual *qual, Expr *expr, PlannerInfo *root);
-int deparseVar(PushableQual *qual, Var *node, PlannerInfo *root);
-int deparseConst(PushableQual *qual, Const *node, PlannerInfo *root);
-//void deparseBoolExpr(StringInfo buf, BoolExpr *node, PlannerInfo *root);
-//void deparseFuncExpr(StringInfo buf, FuncExpr *node, PlannerInfo *root);
-int deparseOpExpr(PushableQual *qual, OpExpr *node, PlannerInfo *root);
+int extractQuals(PushableQualNode **qualRoot, 
+                PlannerInfo *root, 
+                RelOptInfo *baserel);
+int deparseExpr(PushableQualNode *qual,
+                Expr *node,
+                PlannerInfo *root);
+int deparseVar(PushableQualNode *qual, Var *node, PlannerInfo *root);
+int deparseConst(PushableQualNode *qual, Const *node, PlannerInfo *root);
+int deparseBoolExpr(PushableQualNode *qual, BoolExpr *node, PlannerInfo *root);
+//int deparseFuncExpr(PushableQualNode *qual, FuncExpr *node, PlannerInfo *root);
+int deparseOpExpr(PushableQualNode *qual, OpExpr *node, PlannerInfo *root);
+void evalQual(PushableQualNode *qualRoot, int indentLevel);
 
 #endif   /* DC_DEPARSE_H */

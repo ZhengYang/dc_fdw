@@ -657,7 +657,7 @@ dcBeginForeignScan(ForeignScanState *node, int eflags)
 				   &data_dir, &index_dir, &language, &encoding, &options);
 	
 	/* Load dictionary into memory */
-	//dc_load_dict(index_dir);
+	dc_load_dict(index_dir);
     elog(NOTICE, "%d", node->ss.ps.type);
 	
 	/*

@@ -14,6 +14,11 @@
  *
  *-------------------------------------------------------------------------
  */
- 
+
+typedef struct PostingInfo {
+    int ptr; /* point to the posting file position */
+    int len; /* length of the bytes to read */
+} PostingInfo;
+
 int dc_load_dict(char *indexpath);
 int dc_load_stat(char *indexpath, int *num_of_docs, int *num_of_bytes);

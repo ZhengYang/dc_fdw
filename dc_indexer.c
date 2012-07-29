@@ -194,6 +194,21 @@ int dc_index(char *datapath, char *indexpath)
             }
             curentryptr ++;
         }
+        /* global entry for performing NOT */
+        re = (DictionaryEntry *) hash_search(dict, "ALL", HASH_ENTER, &found);
+        if (found == TRUE)
+        {
+            PostingEntry *p_entry;
+            p_entry = (PostingEntry *) palloc(sizeof(PostingEntry));
+            p_entry->doc_id = atoi(dirent->d_name);
+            re->plist = lappend(re->plist, p_entry);
+        } 
+        else {
+            PostingEntry *p_entry;
+            p_entry = (PostingEntry *) palloc(sizeof(PostingEntry));
+            p_entry->doc_id = atoi(dirent->d_name);
+            re->plist = list_make1(p_entry);
+        }
 
         /*
          *  Clean-up:
@@ -241,11 +256,7 @@ int dc_index(char *datapath, char *indexpath)
 
 #ifdef DEBUG	    
         elog(NOTICE, "%s", d_entry->key);
-#endif
-        /* write dict entry */
-        initStringInfo(&sid_dict_line);
-        appendStringInfo(&sid_dict_line, "%s %d\n", d_entry->key, cursor);
-        FileWrite (dict_file, sid_dict_line.data, strlen(sid_dict_line.data));		
+#endif		
         
         /* sort postings list by doc_id */
         slist = (PostingEntry *) palloc(list_length(d_entry->plist) * sizeof(PostingEntry));
@@ -266,8 +277,13 @@ int dc_index(char *datapath, char *indexpath)
             appendStringInfo(&sid_plist_line, "%d ", slist_curr->doc_id);
 	    }
         FileWrite (post_file, sid_plist_line.data, strlen(sid_plist_line.data));
-        cursor += strlen(sid_plist_line.data);
 	    
+	     /* write dict entry */
+        initStringInfo(&sid_dict_line);
+        appendStringInfo(&sid_dict_line, "%s %d %d\n", d_entry->key, cursor, sid_plist_line.len);
+        FileWrite (dict_file, sid_dict_line.data, strlen(sid_dict_line.data));
+	    
+	    cursor += strlen(sid_plist_line.data);
 #ifdef DEBUG
         elog(NOTICE, "%s", sid_plist_line.data);
 #endif

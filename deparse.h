@@ -30,6 +30,7 @@ typedef struct PushableQualNode
     StringInfoData  leftOperand; /* for op_node only */
     StringInfoData  rightOperand; /* for op_node only */
     List            *childNodes; /* list of child PushableQualNodes */
+    List            *plist; /* postings list assoc with this qual */
 } PushableQualNode;
 
 /*

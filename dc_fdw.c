@@ -89,6 +89,7 @@ typedef struct DcFdwPlanState
 	BlockNumber pages;			/* estimate of file's physical size */
     int         dc_size;        /* collection size in bytes */
 	int		    ndocs;		    /* estimate of number of rows in file */
+    List *      rList;          /* reduced list of doc ids by quals pushdown */
 } DcFdwPlanState;
 
 
@@ -97,11 +98,13 @@ typedef struct DcFdwPlanState
  */
 typedef struct DcFdwExecutionState
 {
-	char	   *data_dir;		    /* dc to read */
+	char	   *data_dir;		/* dc to read */
     DIR        *dir_state;
     AttInMetadata *attinmeta;
     int         dc_size;        /* collection size in bytes */
 	int		    ndocs;		    /* estimate of number of rows in file */
+    List *      rList;          /* reduced list of doc ids by quals pushdown */
+    int         rListPtr;       /* for looping through the rList */
 } DcFdwExecutionState;
 
 /*
@@ -471,9 +474,23 @@ dcGetForeignRelSize(PlannerInfo *root,
 					  RelOptInfo *baserel,
 					  Oid foreigntableid)
 {
-	DcFdwPlanState *fdw_private;
+	DcFdwPlanState *fpstate;
     int num_of_docs;
     int num_of_bytes;
+    StringInfoData sid_post_dir;
+    /* dict settings */
+    HTAB *dict;
+    HASHCTL info;
+    List *allList;
+    PushableQualNode *qualRoot;
+    File post_file;
+   
+    /*
+     * initialize hash dictionary
+     */
+    info.keysize = 100000;
+    info.entrysize = sizeof(DictionaryEntry);
+    dict = hash_create ("dict", 100, &info, HASH_ELEM);
     
 #ifdef DEBUG
     elog(NOTICE, "dcGetForeignRelSize");
@@ -483,21 +500,51 @@ dcGetForeignRelSize(PlannerInfo *root,
 	 * Fetch options.  We only need filename at this point, but we might as
 	 * well get everything and not need to re-fetch it later in planning.
 	 */
-	fdw_private = (DcFdwPlanState *) palloc(sizeof(DcFdwPlanState));
+	fpstate = (DcFdwPlanState *) palloc(sizeof(DcFdwPlanState));
 	dcGetOptions(foreigntableid,
-    			   &fdw_private->data_dir, &fdw_private->index_dir,
-    			   &fdw_private->language, &fdw_private->encoding,
-                   &fdw_private->options);
-	baserel->fdw_private = (void *) fdw_private;
-
+    			   &fpstate->data_dir, &fpstate->index_dir,
+    			   &fpstate->language, &fpstate->encoding,
+                   &fpstate->options);
+	baserel->fdw_private = (void *) fpstate;
+	
+	elog(NOTICE, "dcGetForeignRelSize1");
+	
 	/* Estimate relation size */
-    dc_load_stat(fdw_private->index_dir, &num_of_docs, &num_of_bytes);
+    dc_load_stat(fpstate->index_dir, &num_of_docs, &num_of_bytes);
     baserel->rows = (double) num_of_docs;
     elog(NOTICE, "NUM OF DOCS: %f", baserel->rows);
-    fdw_private->dc_size = num_of_bytes;
-    fdw_private->ndocs = num_of_docs;
+    
+    fpstate->dc_size = num_of_bytes;
+    fpstate->ndocs = num_of_docs;
 	//estimate_size(root, baserel, fdw_private);
+	
+	/*
+	 * Extract Quals. We only extract quals that we can push down and 
+	 * convert them into a tree structure for evaluation
+	 */
+	extractQuals(&qualRoot, root, baserel);
+evalQual(qualRoot, 1);
+	/*
+	 * Load Dictionary. Dict is stored in memory for fast access and
+	 * postings lists are in hard disk as it may be too large to fit
+	 * into main memory.
+	 */
+    dc_load_dict(&dict, fpstate->index_dir);
+
+    /*
+     * Evaluate QualTree. Filtered doc_id list.
+     */
+    initStringInfo(&sid_post_dir);
+    appendStringInfo(&sid_post_dir, "%s/postings", fpstate->index_dir);
+    post_file = PathNameOpenFile(sid_post_dir.data, O_RDONLY,  0666);
+    
+    allList = searchTerm("ALL", dict, post_file, TRUE);
+    fpstate->rList = evalQualTree(qualRoot, dict, fpstate->index_dir, allList);
+    elog(NOTICE, "listSize:%d", list_length(fpstate->rList));
+    pfree(qualRoot);
 }
+
+
 
 /*
  * dcGetForeignPaths
@@ -512,39 +559,32 @@ dcGetForeignPaths(PlannerInfo *root,
 					RelOptInfo *baserel,
 					Oid foreigntableid)
 {
-	DcFdwPlanState *fdw_private = (DcFdwPlanState *) baserel->fdw_private;
-	Cost		startup_cost;
+	DcFdwPlanState *fpstate = (DcFdwPlanState *) baserel->fdw_private;
+    ForeignPath *path;
+	Cost        startup_cost;
 	Cost		total_cost;
-    PushableQualNode *qualRoot;
+	List        *fdw_private;
 
 #ifdef DEBUG
     elog(NOTICE, "dcGetForeignPaths");
 #endif
 
 	/* Estimate costs */
-	estimate_costs(root, baserel, fdw_private,
+	estimate_costs(root, baserel, fpstate,
 				   &startup_cost, &total_cost);
-
-	/* Create a ForeignPath node and add it as only possible path */
-	add_path(baserel, (Path *)
-			 create_foreignscan_path(root, baserel,
-									 baserel->rows,
-									 startup_cost,
-									 total_cost,
-									 NIL,		/* no pathkeys */
-									 NULL,		/* no outer rel either */
-									 NIL));		/* no fdw_private data */
-    //elog(NOTICE, "xixihaha: %s", nodeToString(baserel));
-    
-	/*
-	 * If data file was sorted, and we knew it somehow, we could insert
-	 * appropriate pathkeys into the ForeignPath node to tell the planner
-	 * that.
-	 */
 	
-    extractQuals(&qualRoot, root, baserel);
-    evalQual(qualRoot, 1);
-    pfree(qualRoot);
+	/* Construct list of SQL statements and bind it with the path. */
+	fdw_private = lappend(NIL, fpstate->rList);
+	
+	/* Create a ForeignPath node and add it as only possible path */
+	path = create_foreignscan_path(root, baserel,
+								    baserel->rows,
+									startup_cost,
+									total_cost,
+									NIL,		/* no pathkeys */
+									NULL,		/* no outer rel either */
+									fdw_private);
+	add_path(baserel, (Path *) path);
 }
 
 /*
@@ -559,12 +599,19 @@ dcGetForeignPlan(PlannerInfo *root,
 				   List *tlist,
 				   List *scan_clauses)
 {
-	Index		scan_relid = baserel->relid;
-
+    DcFdwPlanState *fpstate = (DcFdwPlanState *) baserel->fdw_private;
+	Index scan_relid = baserel->relid;
+	List *fdw_private;
+	
 #ifdef DEBUG
     elog(NOTICE, "dcGetForeignPlan");
 #endif
 
+    /*
+	 * Make a list contains SELECT statement to it to executor with plan node
+	 * for later use.
+	 */
+	fdw_private = lappend(NIL, fpstate->rList);
 
 	/*
 	 * We have no native ability to evaluate restriction clauses, so we just
@@ -580,7 +627,7 @@ dcGetForeignPlan(PlannerInfo *root,
 							scan_clauses,
 							scan_relid,
 							NIL,	/* no expressions to evaluate */
-							NIL);		/* no private state either */
+							fdw_private);
 }
 
 
@@ -596,8 +643,6 @@ dcExplainForeignScan(ForeignScanState *node, ExplainState *es)
     char       *language;
     char       *encoding;
 	List	   *options;
-	DcFdwExecutionState	   *fdw_private;
-	char	   *sql;
 	int         num_of_docs;
     int         num_of_bytes;
 
@@ -619,10 +664,6 @@ dcExplainForeignScan(ForeignScanState *node, ExplainState *es)
 	/* Suppress dc size if we're not showing cost details */
 	ExplainPropertyLong("Foreign Document Collection Size", (long) num_of_bytes, es);
 	ExplainPropertyLong("Number of Documents", (long) num_of_docs, es);
-	//if (es->costs)
-	//{
-		
-	//}
 }
 
 /*
@@ -640,8 +681,6 @@ dcBeginForeignScan(ForeignScanState *node, int eflags)
 	DcFdwExecutionState *festate;
     int         num_of_docs;
     int         num_of_bytes;
-    //List       *qual_list;
-    //ListCell		*lc;
 
 #ifdef DEBUG
     elog(NOTICE, "dcBeginForeignScan");
@@ -656,36 +695,16 @@ dcBeginForeignScan(ForeignScanState *node, int eflags)
 	dcGetOptions(RelationGetRelid(node->ss.ss_currentRelation),
 				   &data_dir, &index_dir, &language, &encoding, &options);
 	
-	/* Load dictionary into memory */
-	dc_load_dict(index_dir);
-    elog(NOTICE, "%d", node->ss.ps.type);
 	
-	/*
-    foreach (lc, node->ss.ps.qual)
-    {
-        OpExpr	*op;
-        ExprState  *state = lfirst(lc);
-        Node	*left;
-        
-        if (IsA(state->expr, OpExpr))
-        {
-            OpExpr	*op = (OpExpr *) node;
-            if (list_length(op->args) == 2)
-                elog(NOTICE, "%s", "OK");
-            else
-                elog(NOTICE, "%s", "NOT OK");
-            left = list_nth(op->args, 0);
-        }
-        elog(NOTICE, "%d", state->type);
-        elog(NOTICE, "%d", state->expr->type);
-    }
-    */
     dc_load_stat(index_dir, &num_of_docs, &num_of_bytes);
 	/*
 	 * Save state in node->fdw_state.  We must save enough information to call
 	 * BeginCopyFrom() again.
 	 */
 	festate = (DcFdwExecutionState *) palloc(sizeof(DcFdwExecutionState));
+	festate->rList = list_nth( (List *) ((ForeignScan *) node->ss.ps.plan)->fdw_private, 0);
+    festate->rListPtr = 0;
+	elog(NOTICE, "FRLIST:%d", list_length(festate->rList));
 	festate->data_dir = data_dir;
 	festate->dir_state = AllocateDir(data_dir);
 	festate->dc_size = num_of_bytes;        /* collection size in bytes */
@@ -708,23 +727,35 @@ dcIterateForeignScan(ForeignScanState *node)
 	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
 	struct dirent *dirent;
     List *tupleItemList;
+    bool end_of_list = FALSE;
     
-
-    while ( (dirent = ReadDir(festate->dir_state, festate->data_dir)) != NULL)
+    if (list_length(festate->rList) > festate->rListPtr)
     {
         StringInfoData sid_data_dir;
+        StringInfoData sid_fname;
         mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
         File curr_file;
         char *buffer;
         int sz;
         
-        /* skip . and .. */
+        int doc_id = list_nth_int(festate->rList, festate->rListPtr);
+        
+        initStringInfo(&sid_fname);
+        appendStringInfo(&sid_fname, "%d", doc_id);
+    /*
+    while ( (dirent = ReadDir(festate->dir_state, festate->data_dir)) != NULL)
+    {
+    */
+        
+        
+        /* skip . and .. 
         if (strcmp(".", dirent->d_name) == 0) continue;
         if (strcmp("..", dirent->d_name) == 0) continue;
+        */
         
         /* get full path/name of the file */
         initStringInfo(&sid_data_dir);
-        appendStringInfo(&sid_data_dir, "%s/%s", festate->data_dir, dirent->d_name);
+        appendStringInfo(&sid_data_dir, "%s/%s", festate->data_dir, sid_fname.data);
         
         /* read the content of the file */
         curr_file = PathNameOpenFile(sid_data_dir.data, O_RDONLY,  mode);
@@ -734,12 +765,17 @@ dcIterateForeignScan(ForeignScanState *node)
         FileRead(curr_file, buffer, sz);
         buffer[sz] = 0;
         
-        tupleItemList = list_make3(dirent->d_name, dirent->d_name, buffer);  
+        tupleItemList = list_make3(sid_fname.data, sid_fname.data, buffer);  
         
-        /* only get 1 entry */
+        
+        festate->rListPtr += 1;
+        /* only get 1 entry 
         break;
     }
-
+    */
+    }
+    else
+        end_of_list = TRUE;
 	/*
 	 * The protocol for loading a virtual tuple into a slot is first
 	 * ExecClearTuple, then fill the values/isnull arrays, then
@@ -753,7 +789,7 @@ dcIterateForeignScan(ForeignScanState *node)
 	 * foreign tables.
 	 */
     ExecClearTuple(slot);
-	if (dirent != NULL)
+	if (!end_of_list)
 	{
 	    char **values;
         HeapTuple tuple;
@@ -779,7 +815,7 @@ dcIterateForeignScan(ForeignScanState *node)
 static void
 dcEndForeignScan(ForeignScanState *node)
 {
-	DcFdwExecutionState *festate = (DcFdwExecutionState *) node->fdw_state;
+	//DcFdwExecutionState *festate = (DcFdwExecutionState *) node->fdw_state;
 
 #ifdef DEBUG
     elog(NOTICE, "dcEndForeignScan");
@@ -819,7 +855,7 @@ dcAnalyzeForeignTable(Relation relation,
 	char	   *language;
 	char	   *encoding;
 	List	   *options;
-	struct stat stat_buf;
+	//struct stat stat_buf;
 
 	/* Fetch options of foreign table */
 	dcGetOptions(RelationGetRelid(relation),
@@ -857,7 +893,7 @@ estimate_size(PlannerInfo *root, RelOptInfo *baserel,
 {
 	/* Open stats file and Save the output-rows estimate for the planner */
 	baserel->rows = 7000;
-    elog(NOTICE, "TP: %d", baserel->tuples);
+    elog(NOTICE, "TP: %f", baserel->tuples);
 }
 
 

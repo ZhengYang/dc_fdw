@@ -87,13 +87,14 @@ int dc_index(char *datapath, char *indexpath)
         int o;
         char *lexemesptr;
         WordEntry *curentryptr;
+        char *ALL = "ALL";
         
 #ifdef DEBUG
         elog(NOTICE, "-FILE NAME: %s", dirent->d_name);
 #ifdef _DIRENT_HAVE_D_NAMLEN
         elog(NOTICE, "-FILE NAME LEN: %d", dirent->d_namlen);
 #else
-        elog(NOTICE, "-FILE NAME LEN: %d", strlen(dirent->d_name));
+        elog(NOTICE, "-FILE NAME LEN: %d", (int) strlen(dirent->d_name));
 #endif /* _DIRENT_HAVE_D_NAMLEN */
 #endif /* DEBUG */
         
@@ -195,7 +196,7 @@ int dc_index(char *datapath, char *indexpath)
             curentryptr ++;
         }
         /* global entry for performing NOT */
-        re = (DictionaryEntry *) hash_search(dict, "ALL", HASH_ENTER, &found);
+        re = (DictionaryEntry *) hash_search(dict, (char *) ALL, HASH_ENTER, &found);
         if (found == TRUE)
         {
             PostingEntry *p_entry;
@@ -263,8 +264,7 @@ int dc_index(char *datapath, char *indexpath)
         slist_curr = slist;
         foreach(cell, d_entry->plist)
         {
-            PostingEntry *p_entry;
-            p_entry = (PostingEntry *) lfirst(cell);
+            PostingEntry *p_entry = (PostingEntry *) lfirst(cell);
             slist_curr->doc_id = p_entry->doc_id;
             slist_curr ++;
         }

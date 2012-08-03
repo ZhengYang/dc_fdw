@@ -539,7 +539,7 @@ evalQual(qualRoot, 1);
     post_file = PathNameOpenFile(sid_post_dir.data, O_RDONLY,  0666);
     
     allList = searchTerm("ALL", dict, post_file, TRUE);
-    fpstate->rList = evalQualTree(qualRoot, dict, fpstate->index_dir, allList);
+    fpstate->rList = allList;//evalQualTree(qualRoot, dict, fpstate->index_dir, allList);
     elog(NOTICE, "listSize:%d", list_length(fpstate->rList));
     pfree(qualRoot);
 }

@@ -69,10 +69,6 @@ dc_load_dict(HTAB **dict, char *indexpath)
     PostingInfo *re;
     StringInfoData sid_term;
     int ptr = 0;
-    
-    HASH_SEQ_STATUS status;
-    int cursor;
-    PostingInfo *d_entry;
 
 #ifdef DEBUG
     elog(NOTICE, "enter dc_load_dict");
@@ -147,10 +143,10 @@ hasSkip(int curr, int interval, int total)
         return FALSE;
     else {
         if (curr % interval == 0) {
-            if (curr + interval > total)
-                return FALSE;
-            else
+            if (curr + interval < total)
                 return TRUE;
+            else
+                return FALSE;
         }
         else
             return FALSE;
@@ -170,30 +166,38 @@ skip(int curr, int interval)
 List *
 pIntersect(List *list1, List *list2)
 {
-    List *rList;
+    List *rList = NIL;
     int list1len = list_length(list1);
     int list2len = list_length(list2);
     int skipInterval1 = (int) sqrt((double) list1len);
     int skipInterval2 = (int) sqrt((double) list2len);
     int list1curr = 0;
     int list2curr = 0;
-    
+    /*
+    elog(NOTICE, "%s", "pIntersect");
+    elog(NOTICE, "List1:%d", list1len);
+    elog(NOTICE, "List2:%d", list2len);
+    */
     while (list1curr < list1len && list2curr < list2len)
     {
-        PostingEntry *entry1 = (PostingEntry *) list_nth(list1, list1curr);
-        PostingEntry *entry2 = (PostingEntry *) list_nth(list2, list2curr);
-        if (entry1->doc_id == entry2->doc_id)
+        int entry1 = list_nth_int(list1, list1curr);
+        int entry2 = list_nth_int(list2, list2curr);
+        /*
+        elog(NOTICE, "ListCurr1:%d:%d", list1curr, entry1);
+        elog(NOTICE, "ListCurr2:%d:%d", list2curr, entry2);
+        */
+        if (entry1 == entry2)
         {
-            rList = lappend_int(rList, entry1->doc_id);
+            rList = lappend_int(rList, entry1);
             list1curr ++;
             list2curr ++;
         }
-        else if (entry1->doc_id < entry2->doc_id) {
+        else if (entry1 < entry2) {
             if (hasSkip(list1curr, skipInterval1, list1len) && 
-                ((PostingEntry *) list_nth(list1, skip(list1curr, skipInterval1)))->doc_id <= entry2->doc_id ) 
+                list_nth_int(list1, skip(list1curr, skipInterval1)) <= entry2 ) 
             {
                 while (hasSkip(list1curr, skipInterval1, list1len) && 
-                    ((PostingEntry *) list_nth(list1, skip(list1curr, skipInterval1)))->doc_id <= entry2->doc_id)
+                    list_nth_int(list1, skip(list1curr, skipInterval1)) <= entry2)
                     list1curr = skip(list1curr, skipInterval1);
             }
             else
@@ -201,10 +205,10 @@ pIntersect(List *list1, List *list2)
         }
         else {
             if (hasSkip(list2curr, skipInterval2, list2len) && 
-                ((PostingEntry *) list_nth(list2, skip(list2curr, skipInterval2)))->doc_id <= entry1->doc_id)
+                list_nth_int(list2, skip(list2curr, skipInterval2)) <= entry1)
             {
                 while (hasSkip(list2curr, skipInterval2, list2len)  && 
-                    ((PostingEntry *) list_nth(list2, skip(list2curr, skipInterval2)))->doc_id <= entry1->doc_id )
+                    list_nth_int(list2, skip(list2curr, skipInterval2)) <= entry1 )
                     list2curr = skip(list2curr, skipInterval2);
             }
             else
@@ -222,7 +226,7 @@ pIntersect(List *list1, List *list2)
 List *
 pIntersectNot(List *list1, List *list2)
 {
-    List *rList;
+    List *rList = NIL;
     int list1len = list_length(list1);
     int list2len = list_length(list2);
     int list1curr = 0;
@@ -230,28 +234,28 @@ pIntersectNot(List *list1, List *list2)
     
     while (list1curr < list1len)
     {
-        PostingEntry *entry1 = (PostingEntry *) list_nth(list1, list1curr);
+        int entry1 = list_nth_int(list1, list1curr);
         
         if (list2curr < list2len)
         {
-            PostingEntry *entry2 = (PostingEntry *) list_nth(list2, list2curr);
-            if (entry1->doc_id == entry2->doc_id)
+            int entry2 = list_nth_int(list2, list2curr);
+            if (entry1 == entry2)
             {
                 list1curr ++;
                 list2curr ++;
             }
-            else if (entry1->doc_id < entry2->doc_id)
+            else if (entry1 < entry2)
             {
-                rList = lappend_int(rList, entry1->doc_id);
+                rList = lappend_int(rList, entry1);
                 list1curr ++;
             }
-            else if (entry1->doc_id > entry2->doc_id)
+            else if (entry1 > entry2)
             {
                 list2curr ++;
             }
         }
         else {
-            rList = lappend_int(rList, entry1->doc_id);
+            rList = lappend_int(rList, entry1);
             list1curr ++;
         }    
     }
@@ -272,35 +276,31 @@ pUnion(List *list1, List *list2)
     int list1curr = 0;
     int list2curr = 0;
 
-    elog(NOTICE, "%s", "pUnion");
-    elog(NOTICE, "List1:%d", list1len);
-    elog(NOTICE, "List2:%d", list2len);
-
     while (list1curr < list1len || list2curr < list2len)
     {
         if (list1curr < list1len && list2curr < list2len)
         {
-            PostingEntry *entry1 = (PostingEntry *) list_nth(list1, list1curr);
-            PostingEntry *entry2 = (PostingEntry *) list_nth(list2, list2curr);
-            if ( entry1->doc_id == entry2->doc_id )
+            int entry1 = list_nth_int(list1, list1curr);
+            int entry2 = list_nth_int(list2, list2curr);
+            if ( entry1 == entry2 )
             {
-                rList = lappend_int(rList, entry1->doc_id);
+                rList = lappend_int(rList, entry1);
             }
             else {
-                rList = lappend_int(rList, entry1->doc_id);
-                rList = lappend_int(rList, entry2->doc_id);
+                rList = lappend_int(rList, entry1);
+                rList = lappend_int(rList, entry2);
             }
             list1curr ++;
             list2curr ++;
         }
         else if (list1curr < list1len) {
-            PostingEntry *entry1 = (PostingEntry *) list_nth(list1, list1curr);
-            rList = lappend_int(rList, entry1->doc_id);
+            int entry1 = list_nth_int(list1, list1curr);
+            rList = lappend_int(rList, entry1);
             list1curr ++;
         }
         else if (list2curr < list2len) {
-            PostingEntry *entry2 = (PostingEntry *) list_nth(list2, list2curr);
-            rList = lappend_int(rList, entry2->doc_id);
+            int entry2 = list_nth_int(list2, list2curr);
+            rList = lappend_int(rList, entry2);
             list2curr ++;
         }
     }
@@ -407,10 +407,18 @@ evalQualTree(PushableQualNode *node, HTAB *dict, char *indexpath, List *allList)
         ListCell *cell;
         if (strcmp((node->opname).data, "AND") == 0)
         {
+            bool firstNode = TRUE;
             foreach(cell, node->childNodes)
             {
                 PushableQualNode *childNode = (PushableQualNode *) lfirst(cell);
-                rList = pIntersect(rList, evalQualTree(childNode, dict, indexpath, allList));
+                
+                if (firstNode)
+                {
+                    rList = evalQualTree(childNode, dict, indexpath, allList);
+                    firstNode = FALSE;
+                }
+                else
+                    rList = pIntersect(rList, evalQualTree(childNode, dict, indexpath, allList));
             }
         }
         else if (strcmp((node->opname).data, "OR") == 0)

@@ -34,6 +34,7 @@
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
+#include "tsearch/ts_utils.h"
 
 #include "deparse.h"
 
@@ -121,11 +122,11 @@ deparseExpr(PushableQualNode *qual, Expr *node, PlannerInfo *root)
 		    elog(NOTICE, "T_Var");
 			return deparseVar(qual, (Var *) node, root);
     		break;
-    	/* Unsupported quals */	
     	case T_FuncExpr:
-        	elog(NOTICE, "T_FuncExpr: not pushable");
-            return -1;//deparseFuncExpr(qual, (FuncExpr *) node, root);
-        	break;
+            elog(NOTICE, "T_FuncExpr");
+            return deparseFuncExpr(qual, (FuncExpr *) node, root);
+            break;
+    	/* Unsupported quals */
 		case T_NullTest:
 		    elog(NOTICE, "T_NullTest: not pushable");
             return -1;
@@ -212,9 +213,9 @@ deparseVar(PushableQualNode *qual,
 	if (colname == NULL)
 		colname = get_attname(rte->relid, node->varattno);
 
-	if (qual->leftOperand.len == 0 && 
+	if ((qual->leftOperand.len == 0 && 
 	    qual->rightOperand.len == 0 && 
-	    strcmp(qual->opname.data, "@@") == 0)
+	    strcmp(qual->opname.data, "@@") == 0))
 	{
         appendStringInfo(&qual->leftOperand, "%s", colname);
         return 0;
@@ -245,16 +246,22 @@ deparseConst(PushableQualNode *qual,
         elog(NOTICE, "Const Null is unsupported!");
 		return -1;
 	}
-	
-	/* check if the qual is in good shape to be pushed down */
-    if (strcmp(qual->opname.data, "@@") == 0 &&
+	elog(NOTICE, "CAO3");
+	/* check if the qual is in good shape to be pushed down
+	 * 1. [var @@] const
+	 * 2. [function](const)
+	 */
+    if ((strcmp(qual->opname.data, "@@") == 0 &&
         qual->leftOperand.len != 0 &&
         qual->rightOperand.len == 0)
+        ||
+        (strcmp(qual->optype.data, "func_node") == 0 &&
+        strcmp(qual->opname.data, "to_tsquery") == 0))
     {
         getTypeOutputInfo(node->consttype,
     					  &typoutput, &typIsVarlena);
     	extval = OidOutputFunctionCall(typoutput, node->constvalue);
-        
+    	
     	switch (node->consttype)
     	{
     		case ANYARRAYOID:
@@ -291,10 +298,13 @@ deparseConst(PushableQualNode *qual,
     		case VARBITOID:
     			appendStringInfo(&qual->rightOperand, "B'%s'", extval);
     			break;
+    		case TEXTOID:
+                initStringInfo(&qual->rightOperand);
+    		    appendStringInfo(&qual->rightOperand, "%s", extval);
+                break;
     		default:
     			{
     				const char *valptr;
-    				
     				for (valptr = extval; *valptr; valptr++)
     				{
     					char		ch = *valptr;
@@ -383,7 +393,7 @@ deparseBoolExpr(PushableQualNode *qual,
  * Function name (and type name) is always qualified by schema name to avoid
  * problems caused by different setting of search_path on remote side.
  */
- /*
+ 
 int
 deparseFuncExpr(PushableQualNode *qual,
 				FuncExpr *node,
@@ -394,38 +404,55 @@ deparseFuncExpr(PushableQualNode *qual,
 	const char	   *funcname;
 	ListCell	   *arg;
 	bool			first;
-
+    StringInfoData  buf;
+    TSQuery         tsquery;
+    
+    initStringInfo(&buf);
+    
 	pronamespace = get_func_namespace(node->funcid);
 	schemaname = quote_identifier(get_namespace_name(pronamespace));
 	funcname = quote_identifier(get_func_name(node->funcid));
-
-	if (node->funcformat == COERCE_EXPLICIT_CALL)
+	
+	/* check if this function can be pushed down */
+	
+    if (node->funcformat == COERCE_EXPLICIT_CALL)
 	{
-		
-		appendStringInfo(buf, "%s.%s(", schemaname, funcname);
-		first = true;
-		foreach(arg, node->args)
-		{
-			if (!first)
-				appendStringInfo(buf, ", ");
-			deparseExpr(buf, lfirst(arg), root);
-			first = false;
-		}
-		appendStringInfoChar(buf, ')');
+	    if (strcmp(schemaname, "pg_catalog") == 0 && strcmp(funcname, "to_tsquery") == 0)
+	    {
+		    PushableQualNode *subtree = (PushableQualNode *) palloc(sizeof(PushableQualNode));
+            initStringInfo(&subtree->opname);
+            appendStringInfo(&subtree->opname, "%s", funcname);
+            initStringInfo(&subtree->optype);
+            appendStringInfo(&subtree->optype, "%s", "func_node");
+		    foreach(arg, node->args)
+		    {
+		        PushableQualNode *pqTree = (PushableQualNode *) palloc(sizeof(PushableQualNode));
+				appendStringInfo(&buf, ", ");
+			    deparseExpr(subtree, lfirst(arg), root);
+                elog(NOTICE, "subtree:%s", subtree->rightOperand.data);
+		        tsquery = (TSQuery) DirectFunctionCall1( to_tsquery, PointerGetDatum(cstring_to_text(subtree->rightOperand.data)) );
+		        QTNode *qtTree = QT2QTN(GETQUERY(tsquery), GETOPERAND(tsquery));
+                copyTree(qtTree, qual);
+                evalQual(qual, 4);
+            }
+            return 0;
+	    }
 	}
 	else if (node->funcformat == COERCE_EXPLICIT_CAST)
 	{
-		
-		appendStringInfoChar(buf, '(');
-		deparseExpr(buf, linitial(node->args), root);
-		appendStringInfo(buf, ")::%s", funcname);
+	
+		appendStringInfoChar(&buf, '(');
+		deparseExpr(qual, linitial(node->args), root);
+		appendStringInfo(&buf, ")::%s", funcname);
 	}
 	else
 	{
-		deparseExpr(buf, linitial(node->args), root);
+		deparseExpr(qual, linitial(node->args), root);
 	}
+    elog(NOTICE, "FUNC:%s", buf.data);
+    return -1;
 }
-*/
+
 
 /*
  * Deparse given operator expression into buf.  To avoid problems around
@@ -513,4 +540,49 @@ evalQual(PushableQualNode *qualRoot, int indentLevel)
             evalQual((PushableQualNode *) lfirst(lc), indentLevel + 1);
         }
     } 
+}
+
+void
+copyTree(QTNode *qtTree, PushableQualNode *pqTree)
+{
+    int n;
+    QueryItem * queryItem = qtTree->valnode;
+    
+    if (queryItem->type == QI_VAL)
+    {
+        initStringInfo(&pqTree->optype);
+        appendStringInfo(&pqTree->optype, "%s", "op_node");
+        initStringInfo(&pqTree->opname);
+        appendStringInfo(&pqTree->opname, "%s", "@@");
+        initStringInfo(&pqTree->leftOperand);
+        initStringInfo(&pqTree->rightOperand);
+        appendStringInfo(&pqTree->rightOperand, "%s", qtTree->word);
+    }
+    else if (queryItem->type == QI_OPR)
+    {
+        initStringInfo(&pqTree->optype);
+        appendStringInfo(&pqTree->optype, "%s", "bool_node");
+        
+        if (queryItem->qoperator.oper == OP_NOT)
+        {
+            initStringInfo(&pqTree->opname);
+            appendStringInfo(&pqTree->opname, "%s", "NOT");
+        }
+        else if (queryItem->qoperator.oper == OP_AND)
+        {
+            initStringInfo(&pqTree->opname);
+            appendStringInfo(&pqTree->opname, "%s", "AND");
+        }
+        else if (queryItem->qoperator.oper == OP_OR)
+        {
+            initStringInfo(&pqTree->opname);
+            appendStringInfo(&pqTree->opname, "%s", "OR");
+        }
+    }
+    for (n = 0; n < qtTree->nchild; n++)
+    {
+        PushableQualNode *subtree = (PushableQualNode *) palloc(sizeof(PushableQualNode));
+        pqTree->childNodes = lappend(pqTree->childNodes, subtree);
+        copyTree(qtTree->child[n], subtree);
+    }
 }

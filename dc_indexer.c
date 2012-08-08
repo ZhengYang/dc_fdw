@@ -147,7 +147,7 @@ int dc_index(char *datapath, char *indexpath)
             PostingEntry *p_entry;
             
             initStringInfo (&str);
-            appendBinaryStringInfo (&str, lexemesptr + curentryptr->pos, curentryptr->len);
+            appendBinaryStringInfo(&str, lexemesptr + curentryptr->pos, curentryptr->len);
 #ifdef DEBUG
             //elog(NOTICE, "--TOKEN: %s", str.data);
 #endif

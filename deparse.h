@@ -26,7 +26,7 @@
 typedef struct PushableQualNode
 {
     StringInfoData  opname; /* AND, OR, NOT if bool_node, '@@' else */
-    StringInfoData  optype; /* [bool_node, op_node] */
+    StringInfoData  optype; /* [bool_node, op_node, func_node] */
     StringInfoData  leftOperand; /* for op_node only */
     StringInfoData  rightOperand; /* for op_node only */
     List            *childNodes; /* list of child PushableQualNodes */
@@ -45,8 +45,9 @@ int deparseExpr(PushableQualNode *qual,
 int deparseVar(PushableQualNode *qual, Var *node, PlannerInfo *root);
 int deparseConst(PushableQualNode *qual, Const *node, PlannerInfo *root);
 int deparseBoolExpr(PushableQualNode *qual, BoolExpr *node, PlannerInfo *root);
-//int deparseFuncExpr(PushableQualNode *qual, FuncExpr *node, PlannerInfo *root);
+int deparseFuncExpr(PushableQualNode *qual, FuncExpr *node, PlannerInfo *root);
 int deparseOpExpr(PushableQualNode *qual, OpExpr *node, PlannerInfo *root);
 void evalQual(PushableQualNode *qualRoot, int indentLevel);
+void copyTree(QTNode *qtTree, PushableQualNode *pqTree);
 
 #endif   /* DC_DEPARSE_H */

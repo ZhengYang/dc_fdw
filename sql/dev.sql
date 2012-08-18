@@ -22,8 +22,8 @@ CREATE SERVER dc_server
 CREATE FOREIGN TABLE dc_table (id text, title text, content text) 
 	SERVER dc_server
 	OPTIONS (
-	    data_dir '/pgsql/postgresql-9.1.3/contrib/dc_fdw/data/reuters/training', 
-    	index_dir '/pgsql/postgresql-9.1.3/contrib/dc_fdw/data/reuters/index',
-    	language 'en',
-    	encoding 'ascii'
+	    data_dir '/pgsql/postgres/contrib/dc_fdw/data/reuters/training', 
+    	index_dir '/pgsql/postgres/contrib/dc_fdw/data/reuters/index',
+    	id_col 'id',
+    	text_col 'content'
     );

@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
- * dc_search.c
- *		  searcher for document collections foreign-data wrapper.
+ * searcher.c
+ *		  Searcher for document collections foreign-data wrapper.
  *
  * Copyright (c) 2012, PostgreSQL Global Development Group
  *
@@ -10,94 +10,173 @@
  * Author: Zheng Yang <zhengyang4k@gmail.com>
  *
  * IDENTIFICATION
- *		  contrib/dc_fdw/dc_searcher.c
+ *		  contrib/dc_fdw/searcher.c
  *
  *-------------------------------------------------------------------------
  */
 
-#include "dc_searcher.h"
+#include "qual_pushdown.h"
 
 bool hasSkip(int curr, int interval, int total);
 int skip(int curr, int interval);
 
-int dc_load_stat(char *indexpath, int *num_of_docs, int *num_of_bytes)
+/*
+ * open stats file
+ */
+File
+openStat (char *indexpath)
 {
-    File stat_file;
     StringInfoData sid_stat_dir;
-    int status;
-    int sz;
-    char *buffer;
     
-#ifdef DEBUG
-     elog(NOTICE, "dc_load_stat");
-#endif
-
     initStringInfo(&sid_stat_dir);
-    appendStringInfo(&sid_stat_dir, "%s/stats", indexpath);
-
-#ifdef DEBUG
-    elog(NOTICE, "STATS FILE NAME: %s", sid_stat_dir.data);
-#endif
-    stat_file = PathNameOpenFile(sid_stat_dir.data, O_RDONLY,  0666);
+    appendStringInfo(&sid_stat_dir, "%s/stat", indexpath);
     
-    sz = FileSeek(stat_file, 0, SEEK_END);
-    FileSeek(stat_file, 0, SEEK_SET);
-    buffer = (char *) palloc(sizeof(char) * (sz + 1) );
-    FileRead(stat_file, buffer, sz);
-    buffer[sz] = 0;
+    return PathNameOpenFile(sid_stat_dir.data, O_RDONLY,  0666);
+}
+
+/*
+ * open dict file
+ */
+File
+openDict (char *indexpath)
+{
+    StringInfoData sid_dict_dir;
+    
+    initStringInfo(&sid_dict_dir);
+    appendStringInfo(&sid_dict_dir, "%s/dict", indexpath);
+    
+    return PathNameOpenFile(sid_dict_dir.data, O_RDONLY,  0666);
+}
+
+/*
+ * open postings file
+ */
+File
+openPost (char *indexpath)
+{
+    StringInfoData sid_post_dir;
+    
+    initStringInfo(&sid_post_dir);
+    appendStringInfo(&sid_post_dir, "%s/post", indexpath);
+    
+    return PathNameOpenFile(sid_post_dir.data, O_RDONLY,  0666);
+}
+
+/*
+ * open a doc from collection
+ */
+File
+openDoc (char *fname)
+{
+    return PathNameOpenFile(fname, O_RDONLY,  0666);
+}
+
+/*
+ * close stats file
+ */
+void
+closeStat (File sfile)
+{
+    FileClose(sfile);
+}
+
+/*
+ * close dict file
+ */
+void
+closeDict (File dfile)
+{
+    FileClose(dfile);
+}
+
+/*
+ * close post file
+ */
+void
+closePost (File pfile)
+{
+    FileClose(pfile);
+}
+
+/*
+ * close doc
+ */
+void
+closeDoc (File file)
+{
+    FileClose(file);
+}
+
+/*
+ * load precalculated collection-wise stats
+ */
+int
+loadStat(CollectionStats **stats, File sfile)
+{
+    int     sz;         /* size of stats file */
+    char    *buf;       /* buffer for stats file content */
+    int     status;     /* sscanf status */
+    int     dcNumOfFiles;
+    int     dcNumOfBytes;
+    
+#ifdef DEBUG
+     elog(NOTICE, "loadStat");
+#endif
+
+    /* load file content into buffer */
+    sz = FileSeek(sfile, 0, SEEK_END);
+    FileSeek(sfile, 0, SEEK_SET);
+    buf = (char *) palloc(sizeof(char) * (sz + 1) );
+    FileRead(sfile, buf, sz);
+    buf[sz] = 0;
     
     /* number of documents in the doc collection */
-    status = sscanf(buffer,
+    status = sscanf(buf,
             "NUM_OF_DOCS:%d\nNUM_OF_BYTES:%d",
-			 num_of_docs, num_of_bytes);
-	elog(NOTICE, "---%d", *num_of_docs);
+			 &dcNumOfFiles, &dcNumOfBytes);
 	if (status != 2)
 		elog(ERROR, "Cannot read stats file!");
+	
+    (*stats)->numOfDocs = dcNumOfFiles;
+    (*stats)->numOfBytes = dcNumOfBytes;
+    (*stats)->bytesPerDoc = ((double) dcNumOfBytes) / dcNumOfFiles;
+	
     return 0;
 }
 
+/*
+ * load dict into memory from file
+ */
 int
-dc_load_dict(HTAB **dict, char *indexpath)
+loadDict(HTAB **dict, File dfile)
 {
-    File dict_file;
-    int sz;
+    int             sz;     /* size of the dict file */
+    char            *buf;
+    char            *token;
+    PostingInfo     *re;
+    StringInfoData  sidTerm;
+    int ptr = 0;            /* pointer to start position */
     int o = 0;
-    char *token;
-    char *buffer;
-    StringInfoData sid_dict_dir;
     
-    PostingInfo *re;
-    StringInfoData sid_term;
-    int ptr = 0;
-
 #ifdef DEBUG
-    elog(NOTICE, "enter dc_load_dict");
+    elog(NOTICE, "loadDict");
 #endif
     
-    initStringInfo(&sid_dict_dir);
-    appendStringInfo(&sid_dict_dir, "%s/dictionary", indexpath);
+    /* load file content into buffer */
+    sz = FileSeek(dfile, 0, SEEK_END);
+    FileSeek(dfile, 0, SEEK_SET);
+    buf = (char *) palloc(sizeof(char) * (sz + 1) );
+    FileRead(dfile, buf, sz);
+    buf[sz] = 0;
 
-#ifdef DEBUG
-    elog(NOTICE, "%s", sid_dict_dir.data);
-#endif
-    
-    
-    dict_file = PathNameOpenFile(sid_dict_dir.data, O_RDONLY,  0666);
-    sz = FileSeek(dict_file, 0, SEEK_END);
-    FileSeek(dict_file, 0, SEEK_SET);
-    buffer = (char *) palloc(sizeof(char) * (sz + 1) );
-    FileRead(dict_file, buffer, sz);
-    buffer[sz] = 0;
-
-    token = strtok(buffer, " \n");
-    initStringInfo(&sid_term);
+    initStringInfo(&sidTerm);
+    token = strtok(buf, " \n");
     while ( token != NULL )
     {
-        bool found;
         /* term token */
         if (o % 3 == 0)
         {
-            appendStringInfo(&sid_term, "%s", token);
+            appendStringInfo(&sidTerm, "%s", token);
         }
         /* pointer to start position */
         else if (o % 3 == 1) {
@@ -105,10 +184,11 @@ dc_load_dict(HTAB **dict, char *indexpath)
         }
         /* length of the plist string*/
         else if (o % 3 == 2) {
-            re = (PostingInfo *) hash_search(*dict, (void *) sid_term.data, HASH_ENTER, &found);
+            bool found;
+            re = (PostingInfo *) hash_search(*dict, (void *) sidTerm.data, HASH_ENTER, &found);
             if (found == TRUE)
             {
-                elog(NOTICE, "Dictionary file '%s' corrupted!", sid_dict_dir.data);
+                elog(ERROR, "Dictionary file corrupted!");
                 return -1;
             }
             else
@@ -116,22 +196,28 @@ dc_load_dict(HTAB **dict, char *indexpath)
                 re->ptr = ptr;
                 re->len = atoi(token);
             }
-            resetStringInfo(&sid_term);
+            resetStringInfo(&sidTerm);
         }
-        
         token = strtok(NULL, " \n");
         o ++;
     }
-/*
-    hash_seq_init(&status, *dict);
-    cursor = 0;
-    while ((d_entry = (PostingInfo *) hash_seq_search(&status)) != NULL)
-	{
-        elog(NOTICE, "D_ENTRY: %s", d_entry->key);
-    }
-*/  
     return 0;
 }
+
+
+int
+loadDoc(char **buf, File file)
+{
+    int sz;
+    /* read the content of the file */
+    sz = FileSeek(file, 0, SEEK_END);
+    FileSeek(file, 0, SEEK_SET);
+    *buf = (char *) palloc(sizeof(char) * (sz + 1) );
+    FileRead(file, *buf, sz);
+    (*buf)[sz] = 0;
+    return 0;
+}
+
 
 /*
  * skip list functions
@@ -333,12 +419,14 @@ searchTerm(char *text, HTAB * dict, File pfile, bool isALL)
     char *lexemesptr;
     WordEntry *curentryptr;
     StringInfoData str;
+    PostingInfo *re;
     char *term = text;
 
 #ifdef DEBUG
-    elog(NOTICE, "searchTerm: %s", text);
+    elog(NOTICE, "searchTerm");
+    elog(NOTICE, "Term:%s", term);
 #endif
-    elog(NOTICE, "term:%s", term);
+    
     if (!isALL)
     {
         /* normalize term to root form */
@@ -352,7 +440,7 @@ searchTerm(char *text, HTAB * dict, File pfile, bool isALL)
     }
     
     /* search term in the dictionary */
-    PostingInfo *re = (PostingInfo *) hash_search(dict, (void *) term, HASH_FIND, &found);   
+    re = (PostingInfo *) hash_search(dict, (void *) term, HASH_FIND, &found);   
     
     if (found)
     {
@@ -376,30 +464,30 @@ searchTerm(char *text, HTAB * dict, File pfile, bool isALL)
 }
 
 /*
- * evaluate the pushdown qual tree
+ * evaluate the qual tree
  */
 List *
-evalQualTree(PushableQualNode *node, HTAB *dict, char *indexpath, List *allList)
+evalQualTree(PushableQualNode *node, HTAB *dict, File pfile, List *allList)
 {
     List *rList = NIL;
-    StringInfoData sid_post_dir;
-    File pfile;
     
-    initStringInfo(&sid_post_dir);
-    appendStringInfo(&sid_post_dir, "%s/postings", indexpath);
-    
-    pfile = PathNameOpenFile(sid_post_dir.data, O_RDONLY,  0666);
+#ifdef DEBUG
+    elog(NOTICE, "evalQualTree");
+#endif
     
     /*
      * if op_node (leaf node)
      * then retrieve postings
      */
-    if (strcmp((node->optype).data, "op_node") == 0)
+    if (strcmp(node->optype.data, "op_node") == 0)
     {
-        rList = searchTerm((node->rightOperand).data, dict, pfile, FALSE);
+        if ( strcmp( node->opname.data, "@@" ) == 0)
+            rList = searchTerm(node->rightOperand.data, dict, pfile, FALSE);
+        else if ( strcmp( node->opname.data, "=" ) == 0)
+            rList = list_make1_int( atoi(node->rightOperand.data) );
     }
     /*
-     * else if bool_node
+     * else bool_node (internal node)
      * perform boolean operations
      */
     else if (strcmp((node->optype).data, "bool_node") == 0) 
@@ -414,11 +502,11 @@ evalQualTree(PushableQualNode *node, HTAB *dict, char *indexpath, List *allList)
                 
                 if (firstNode)
                 {
-                    rList = evalQualTree(childNode, dict, indexpath, allList);
+                    rList = evalQualTree(childNode, dict, pfile, allList);
                     firstNode = FALSE;
                 }
                 else
-                    rList = pIntersect(rList, evalQualTree(childNode, dict, indexpath, allList));
+                    rList = pIntersect(rList, evalQualTree(childNode, dict, pfile, allList));
             }
         }
         else if (strcmp((node->opname).data, "OR") == 0)
@@ -426,13 +514,13 @@ evalQualTree(PushableQualNode *node, HTAB *dict, char *indexpath, List *allList)
             foreach(cell, node->childNodes)
             {
                 PushableQualNode *childNode = (PushableQualNode *) lfirst(cell);
-                rList = pUnion(rList, evalQualTree(childNode, dict, indexpath, allList));
+                rList = pUnion(rList, evalQualTree(childNode, dict, pfile, allList));
             }
         }
         else if (strcmp((node->opname).data, "NOT") == 0)
         {
             PushableQualNode *childNode = (PushableQualNode *) list_nth (node->childNodes, 0);
-            rList = pNegate(evalQualTree(childNode, dict, indexpath, allList), allList);
+            rList = pNegate(evalQualTree(childNode, dict, pfile, allList), allList);
         }
     }
     return rList;

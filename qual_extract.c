@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * deparse.c
+ * qual_extract.c
  *		  Quals extraction utility
  *
  * Copyright (c) 2012, PostgreSQL Global Development Group
@@ -10,7 +10,7 @@
  * Author: Zheng Yang <zhengyang4k@gmail.com>
  *
  * IDENTIFICATION
- *		  contrib/dc_fdw/deparse.c
+ *		  contrib/dc_fdw/qual_extract.c
  *
  *-------------------------------------------------------------------------
  */
@@ -36,14 +36,25 @@
 #include "utils/syscache.h"
 #include "tsearch/ts_utils.h"
 
-#include "deparse.h"
+#include "qual_extract.h"
+
+/*
+ * handlers for different types of quals
+ */
+int deparseExpr(PushableQualNode *qual, Expr *node, PlannerInfo *root, List *mapping);
+int deparseVar(PushableQualNode *qual, Var *node, PlannerInfo *root, List *mapping);
+int deparseConst(PushableQualNode *qual, Const *node, PlannerInfo *root, List *mapping);
+int deparseBoolExpr(PushableQualNode *qual, BoolExpr *node, PlannerInfo *root, List *mapping);
+int deparseFuncExpr(PushableQualNode *qual, FuncExpr *node, PlannerInfo *root, List *mapping);
+int deparseOpExpr(PushableQualNode *qual, OpExpr *node, PlannerInfo *root, List *mapping);
+void copyTree(QTNode *qtTree, PushableQualNode *pqTree, List *mapping);
 
 /*
  * Examine each element in the list baserestrictinfo of baserel, and constrct
  * a tree structure for utilizing the quals.
  */
 int
-extractQuals(PushableQualNode **qualRoot, PlannerInfo *root, RelOptInfo *baserel)
+extractQuals(PushableQualNode **qualRoot, PlannerInfo *root, RelOptInfo *baserel, List *mapping)
 {
 	ListCell    *lc;
     int         pushableQualCounter = 0;
@@ -56,8 +67,10 @@ extractQuals(PushableQualNode **qualRoot, PlannerInfo *root, RelOptInfo *baserel
 	{
 	    RestrictInfo *ri = (RestrictInfo *) lfirst(lc);
 	    
+#ifdef DEBUG    
 	    elog(NOTICE, "NODE_TAG: %d", nodeTag(ri->clause));
 		elog(NOTICE, "NODE_STR: %s", nodeToString(ri->clause));
+#endif
 	    
 	    /* check if we need to load qual into root */
 	    if (pushableQualCounter == 0)
@@ -66,13 +79,13 @@ extractQuals(PushableQualNode **qualRoot, PlannerInfo *root, RelOptInfo *baserel
 	         * try loading qual into root node of the tree
              * if successful, increment counter
              */
-	        if (deparseExpr(*qualRoot, ri->clause, root) == 0)
+	        if (deparseExpr(*qualRoot, ri->clause, root, mapping) == 0)
 	            pushableQualCounter ++;
         }
         /* construct ANDed tree structure and attach to tree node */
 	    else {
 	        PushableQualNode *qualCurr = (PushableQualNode *) palloc(sizeof(PushableQualNode));
-	        if (deparseExpr(qualCurr, ri->clause, root) == 0)
+	        if (deparseExpr(qualCurr, ri->clause, root, mapping) == 0)
 	        {
 	            PushableQualNode *boolNode = (PushableQualNode *) palloc(sizeof(PushableQualNode));
 	            initStringInfo(&boolNode->opname);
@@ -82,9 +95,8 @@ extractQuals(PushableQualNode **qualRoot, PlannerInfo *root, RelOptInfo *baserel
                 boolNode->childNodes = lappend(boolNode->childNodes, *qualRoot);
                 boolNode->childNodes = lappend(boolNode->childNodes, qualCurr);
                 *qualRoot = boolNode;
+                pushableQualCounter ++;
 	        }
-	        else
-                continue;
 	    }
 	}
     return pushableQualCounter;
@@ -92,39 +104,36 @@ extractQuals(PushableQualNode **qualRoot, PlannerInfo *root, RelOptInfo *baserel
 
 
 /*
- * Deparse given expression into buf.  Actual string operation is delegated to
- * node-type-specific functions.
- *
- * Note that switch statement of this function MUST match the one in
- * foreign_expr_walker to avoid unsupported error..
+ * Deparse given expression into qual.
  */
 int
-deparseExpr(PushableQualNode *qual, Expr *node, PlannerInfo *root)
+deparseExpr(PushableQualNode *qual, Expr *node, PlannerInfo *root, List *mapping)
 {
 	/*
 	 * This part must be match foreign_expr_walker.
 	 */
 	switch (nodeTag(node))
 	{
+	    /* Supported quals */
 		case T_Const:
 		    elog(NOTICE, "T_Const");
-			return deparseConst(qual, (Const *) node, root);
+			return deparseConst(qual, (Const *) node, root, mapping);
 			break;
 		case T_BoolExpr:
 		    elog(NOTICE, "T_BoolExpr");
-            return deparseBoolExpr(qual, (BoolExpr *) node, root);
+            return deparseBoolExpr(qual, (BoolExpr *) node, root, mapping);
 			break;
     	case T_OpExpr:
     	    elog(NOTICE, "T_OpExpr");
-    		return deparseOpExpr(qual, (OpExpr *) node, root);
+    		return deparseOpExpr(qual, (OpExpr *) node, root, mapping);
     		break;
         case T_Var:
 		    elog(NOTICE, "T_Var");
-			return deparseVar(qual, (Var *) node, root);
+			return deparseVar(qual, (Var *) node, root, mapping);
     		break;
     	case T_FuncExpr:
             elog(NOTICE, "T_FuncExpr");
-            return deparseFuncExpr(qual, (FuncExpr *) node, root);
+            return deparseFuncExpr(qual, (FuncExpr *) node, root, mapping);
             break;
     	/* Unsupported quals */
 		case T_NullTest:
@@ -167,14 +176,15 @@ deparseExpr(PushableQualNode *qual, Expr *node, PlannerInfo *root)
 }
 
 /*
- * Deparse node into buf, with relation qualifier if need_prefix was true.  If
+ * Deparse node into qual, with relation qualifier if need_prefix was true.  If
  * node is a column of a foreign table, use value of colname FDW option (if any)
  * instead of attribute name.
  */
 int
 deparseVar(PushableQualNode *qual,
 		   Var *node,
-		   PlannerInfo *root)
+		   PlannerInfo *root,
+		   List *mapping)
 {
 	RangeTblEntry  *rte;
 	char		   *colname = NULL;
@@ -212,13 +222,36 @@ deparseVar(PushableQualNode *qual,
 	 */
 	if (colname == NULL)
 		colname = get_attname(rte->relid, node->varattno);
-
-	if ((qual->leftOperand.len == 0 && 
-	    qual->rightOperand.len == 0 && 
-	    strcmp(qual->opname.data, "@@") == 0))
+	/* identify which column is used here for attempting pushdown */
+	if (strcmp( (char *) list_nth(mapping, 0), colname ) == 0)
 	{
-        appendStringInfo(&qual->leftOperand, "%s", colname);
-        return 0;
+	    /* attempting to pushdown id column. note op must be = */
+	    if ((qual->leftOperand.len == 0 && 
+    	    qual->rightOperand.len == 0 && 
+    	    strcmp(qual->opname.data, "=") == 0))
+    	{
+    	    appendStringInfo(&qual->leftOperand, "%s", colname);
+            return 0;
+    	}
+    	else {
+    	    elog(NOTICE, "Var not supported!(id column must work with = sign)");
+            return -1;
+        }
+	}
+	else if (strcmp( (char *) list_nth(mapping, 1), colname ) == 0)
+	{
+	    /* attempting to pushdown text column */
+	    if ((qual->leftOperand.len == 0 && 
+    	    qual->rightOperand.len == 0 && 
+    	    strcmp(qual->opname.data, "@@") == 0))
+    	{
+            appendStringInfo(&qual->leftOperand, "%s", colname);
+            return 0;
+    	}
+    	else {
+    	    elog(NOTICE, "Var not supported!(text column must work with @@ sign)");
+            return -1;
+        }
 	}
 	else {
 	    elog(NOTICE, "Var not supported!");
@@ -228,13 +261,14 @@ deparseVar(PushableQualNode *qual,
 
 
 /*
- * Deparse given constant value into buf.  This function have to be kept in
+ * Deparse given constant value into qual.  This function have to be kept in
  * sync with get_const_expr.
  */
 int
 deparseConst(PushableQualNode *qual,
 			 Const *node,
-			 PlannerInfo *root)
+			 PlannerInfo *root,
+			 List *mapping)
 {
 	Oid			typoutput;
 	bool		typIsVarlena;
@@ -246,17 +280,21 @@ deparseConst(PushableQualNode *qual,
         elog(NOTICE, "Const Null is unsupported!");
 		return -1;
 	}
-	elog(NOTICE, "CAO3");
 	/* check if the qual is in good shape to be pushed down
-	 * 1. [var @@] const
-	 * 2. [function](const)
+	 * 1. [text @@] const
+	 * 2. [id =] const
+	 * 3. [to_tsquery, plainto_tsquery](const)
 	 */
     if ((strcmp(qual->opname.data, "@@") == 0 &&
         qual->leftOperand.len != 0 &&
         qual->rightOperand.len == 0)
         ||
+        (strcmp(qual->opname.data, "=") == 0 &&
+            qual->leftOperand.len != 0 &&
+            qual->rightOperand.len == 0)
+        ||
         (strcmp(qual->optype.data, "func_node") == 0 &&
-        strcmp(qual->opname.data, "to_tsquery") == 0))
+        (strcmp(qual->opname.data, "to_tsquery") == 0 || strcmp(qual->opname.data, "plainto_tsquery") == 0 )))
     {
         getTypeOutputInfo(node->consttype,
     					  &typoutput, &typIsVarlena);
@@ -331,7 +369,8 @@ deparseConst(PushableQualNode *qual,
 int
 deparseBoolExpr(PushableQualNode *qual,
 				BoolExpr *node,
-				PlannerInfo *root)
+				PlannerInfo *root,
+				List *mapping)
 {
 	ListCell   *lc;
 
@@ -363,7 +402,7 @@ deparseBoolExpr(PushableQualNode *qual,
     if (strcmp(qual->opname.data, "NOT") == 0)
     {
         PushableQualNode *subtree = (PushableQualNode *) palloc(sizeof(PushableQualNode));
-        if (deparseExpr(subtree, list_nth(node->args, 0), root) == 0)
+        if (deparseExpr(subtree, list_nth(node->args, 0), root, mapping) == 0)
         {
             qual->childNodes = lappend(qual->childNodes, subtree);
         }
@@ -375,7 +414,7 @@ deparseBoolExpr(PushableQualNode *qual,
 	    foreach(lc, node->args)
 	    {
 	        PushableQualNode *subtree = (PushableQualNode *) palloc(sizeof(PushableQualNode));
-    		if (deparseExpr(subtree, (Expr *) lfirst(lc), root) == 0)
+    		if (deparseExpr(subtree, (Expr *) lfirst(lc), root, mapping) == 0)
     		    qual->childNodes = lappend(qual->childNodes, subtree);
     		else
                 return -1;
@@ -397,13 +436,13 @@ deparseBoolExpr(PushableQualNode *qual,
 int
 deparseFuncExpr(PushableQualNode *qual,
 				FuncExpr *node,
-				PlannerInfo *root)
+				PlannerInfo *root,
+				List *mapping)
 {
 	Oid				pronamespace;
 	const char	   *schemaname;
 	const char	   *funcname;
 	ListCell	   *arg;
-	bool			first;
     StringInfoData  buf;
     TSQuery         tsquery;
     
@@ -417,23 +456,33 @@ deparseFuncExpr(PushableQualNode *qual,
 	
     if (node->funcformat == COERCE_EXPLICIT_CALL)
 	{
-	    if (strcmp(schemaname, "pg_catalog") == 0 && strcmp(funcname, "to_tsquery") == 0)
+	    if (strcmp(qual->leftOperand.data, (char *) list_nth(mapping, 1)) == 0 &&
+	        strcmp(qual->opname.data, "@@") == 0 &&
+	        strcmp(schemaname, "pg_catalog") == 0 && 
+	        (strcmp(funcname, "to_tsquery") == 0 || strcmp(funcname, "plainto_tsquery") == 0))
 	    {
 		    PushableQualNode *subtree = (PushableQualNode *) palloc(sizeof(PushableQualNode));
             initStringInfo(&subtree->opname);
-            appendStringInfo(&subtree->opname, "%s", funcname);
             initStringInfo(&subtree->optype);
+            appendStringInfo(&subtree->opname, "%s", funcname);
             appendStringInfo(&subtree->optype, "%s", "func_node");
 		    foreach(arg, node->args)
 		    {
-		        PushableQualNode *pqTree = (PushableQualNode *) palloc(sizeof(PushableQualNode));
+                QTNode *qtTree;
 				appendStringInfo(&buf, ", ");
-			    deparseExpr(subtree, lfirst(arg), root);
+			    deparseExpr(subtree, lfirst(arg), root, mapping);
                 elog(NOTICE, "subtree:%s", subtree->rightOperand.data);
-		        tsquery = (TSQuery) DirectFunctionCall1( to_tsquery, PointerGetDatum(cstring_to_text(subtree->rightOperand.data)) );
-		        QTNode *qtTree = QT2QTN(GETQUERY(tsquery), GETOPERAND(tsquery));
-                copyTree(qtTree, qual);
-                evalQual(qual, 4);
+                if (strcmp(funcname, "to_tsquery") == 0)
+		            tsquery = (TSQuery) DirectFunctionCall1( to_tsquery, PointerGetDatum(cstring_to_text(subtree->rightOperand.data)) );
+		        else
+		            tsquery = (TSQuery) DirectFunctionCall1( plainto_tsquery, PointerGetDatum(cstring_to_text(subtree->rightOperand.data)) );
+		        elog(NOTICE, "subtree1:%s", subtree->rightOperand.data);
+		        qtTree = QT2QTN(GETQUERY(tsquery), GETOPERAND(tsquery));
+		        elog(NOTICE, "subtree2:%s", subtree->rightOperand.data);
+                copyTree(qtTree, qual, mapping);
+                elog(NOTICE, "subtree3:%s", subtree->rightOperand.data);
+                printQualTree(qual, 4);
+                elog(NOTICE, "subtree4:%s", subtree->rightOperand.data);
             }
             return 0;
 	    }
@@ -442,12 +491,12 @@ deparseFuncExpr(PushableQualNode *qual,
 	{
 	
 		appendStringInfoChar(&buf, '(');
-		deparseExpr(qual, linitial(node->args), root);
+		deparseExpr(qual, linitial(node->args), root, mapping);
 		appendStringInfo(&buf, ")::%s", funcname);
 	}
 	else
 	{
-		deparseExpr(qual, linitial(node->args), root);
+		deparseExpr(qual, linitial(node->args), root, mapping);
 	}
     elog(NOTICE, "FUNC:%s", buf.data);
     return -1;
@@ -462,7 +511,8 @@ deparseFuncExpr(PushableQualNode *qual,
 int
 deparseOpExpr(PushableQualNode *qual,
 			  OpExpr *node,
-			  PlannerInfo *root)
+			  PlannerInfo *root,
+			  List *mapping)
 {
 	HeapTuple	tuple;
 	Form_pg_operator form;
@@ -482,27 +532,32 @@ deparseOpExpr(PushableQualNode *qual,
 	oprkind = form->oprkind;
 	ReleaseSysCache(tuple);
 
-    /* the only type of qual we can push down is <column> @@ <key> */
+    /* Types of qual we can push down: 
+     * 1. <text> @@ <func or const> 
+     * 2. <id> = <const>
+     */
+#ifdef DEBUG
     elog(NOTICE, "opnspname:%s", opnspname);
     elog(NOTICE, "opname:%s", opname);
     elog(NOTICE, "oprkind:%c", oprkind);
+#endif
     
     if (strcmp(opnspname, "pg_catalog") == 0 && 
-        strcmp(opname, "@@") == 0 &&
+        (strcmp(opname, "@@") == 0 || strcmp(opname, "=") == 0) &&
         oprkind == 'b' )
     {
         initStringInfo(&qual->opname);
-        appendStringInfo(&qual->opname, "%s", "@@");
+        appendStringInfo(&qual->opname, "%s", opname);
         initStringInfo(&qual->optype);
         appendStringInfo(&qual->optype, "%s", "op_node");
         initStringInfo(&qual->leftOperand);
         initStringInfo(&qual->rightOperand);
         
         arg = list_head(node->args);
-        if (deparseExpr(qual, lfirst(arg), root) != 0)
+        if (deparseExpr(qual, lfirst(arg), root, mapping) != 0)
             return -1;
         arg = list_tail(node->args);
-        return deparseExpr(qual, lfirst(arg), root);
+        return deparseExpr(qual, lfirst(arg), root, mapping);
     }
     else {
         elog(NOTICE, "OpExpr not supported!");
@@ -510,8 +565,12 @@ deparseOpExpr(PushableQualNode *qual,
     }
 }
 
+/*
+ * This function serves as a debug function for print out
+ * the structure of Qual tree. 
+ */
 void
-evalQual(PushableQualNode *qualRoot, int indentLevel)
+printQualTree(PushableQualNode *qualRoot, int indentLevel)
 {
     ListCell        *lc;
     StringInfoData  indentStr;
@@ -537,13 +596,29 @@ evalQual(PushableQualNode *qualRoot, int indentLevel)
         elog(NOTICE, "%s%s", indentStr.data, "CHILDREN:");
         foreach(lc, qualRoot->childNodes)
         {
-            evalQual((PushableQualNode *) lfirst(lc), indentLevel + 1);
+            printQualTree((PushableQualNode *) lfirst(lc), indentLevel + 1);
         }
     } 
 }
 
+/*
+ * recursively free the nodes of a qualtree
+ */
 void
-copyTree(QTNode *qtTree, PushableQualNode *pqTree)
+freeQualTree(PushableQualNode *qualRoot)
+{
+    ListCell        *lc;
+    
+    foreach(lc, qualRoot->childNodes)
+        freeQualTree((PushableQualNode *) lfirst(lc));
+    pfree(qualRoot);
+}
+
+/*
+ * Convert tree structure from QTNode tree (to_tsquaery) to Qual tree
+ */
+void
+copyTree(QTNode *qtTree, PushableQualNode *pqTree, List *mapping)
 {
     int n;
     QueryItem * queryItem = qtTree->valnode;
@@ -551,11 +626,12 @@ copyTree(QTNode *qtTree, PushableQualNode *pqTree)
     if (queryItem->type == QI_VAL)
     {
         initStringInfo(&pqTree->optype);
-        appendStringInfo(&pqTree->optype, "%s", "op_node");
         initStringInfo(&pqTree->opname);
-        appendStringInfo(&pqTree->opname, "%s", "@@");
         initStringInfo(&pqTree->leftOperand);
         initStringInfo(&pqTree->rightOperand);
+        appendStringInfo(&pqTree->optype, "%s", "op_node");
+        appendStringInfo(&pqTree->opname, "%s", "@@");
+        appendStringInfo(&pqTree->leftOperand, "%s", (char *) list_nth(mapping, 1));
         appendStringInfo(&pqTree->rightOperand, "%s", qtTree->word);
     }
     else if (queryItem->type == QI_OPR)
@@ -579,10 +655,11 @@ copyTree(QTNode *qtTree, PushableQualNode *pqTree)
             appendStringInfo(&pqTree->opname, "%s", "OR");
         }
     }
+    pqTree->childNodes = NIL;
     for (n = 0; n < qtTree->nchild; n++)
     {
         PushableQualNode *subtree = (PushableQualNode *) palloc(sizeof(PushableQualNode));
         pqTree->childNodes = lappend(pqTree->childNodes, subtree);
-        copyTree(qtTree->child[n], subtree);
+        copyTree(qtTree->child[n], subtree, mapping);
     }
 }

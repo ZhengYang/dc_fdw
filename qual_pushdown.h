@@ -38,7 +38,7 @@
 
 
 /* Debug mode flag */
-/* #define DEBUG*/
+/*#define DEBUG*/
 
 #define KEYSIZE 100000  /* hash key length in bytes */
 #define MAXELEM 100     /* maximum number of elements expected */

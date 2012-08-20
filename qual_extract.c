@@ -386,7 +386,9 @@ deparseBoolExpr(PushableQualNode *qual,
             appendStringInfo(&qual->optype, "%s", "bool_node");
             break;
 	}
+#ifdef DEBUG
 	elog(NOTICE, "opname:%s", qual->opname.data);
+#endif
 	
     /* attach subtree node to the local root */
     if (strcmp(qual->opname.data, "NOT") == 0)
@@ -541,6 +543,7 @@ deparseOpExpr(PushableQualNode *qual,
         appendStringInfo(&qual->optype, "%s", "op_node");
         initStringInfo(&qual->leftOperand);
         initStringInfo(&qual->rightOperand);
+        qual->childNodes = NIL;
         
         arg = list_head(node->args);
         if (deparseExpr(qual, lfirst(arg), root, mapping) != 0)
@@ -597,7 +600,10 @@ void
 freeQualTree(PushableQualNode *qualRoot)
 {
     ListCell        *lc;
-    
+
+#ifdef DEBUG
+    elog(NOTICE, "Freeing node [%s %s]", qualRoot->optype.data, qualRoot->opname.data);
+#endif
     foreach(lc, qualRoot->childNodes)
         freeQualTree((PushableQualNode *) lfirst(lc));
     pfree(qualRoot);

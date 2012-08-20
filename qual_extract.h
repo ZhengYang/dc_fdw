@@ -18,6 +18,8 @@
 #ifndef QUAL_EXTRACT_H
 #define QUAL_EXTRACT_H
 
+/*#define DEBUG*/
+
 #include "postgres.h"
 #include "foreign/foreign.h"
 #include "nodes/relation.h"

@@ -11,7 +11,7 @@ More information can be found in the [wiki page](https://github.com/ZhengYang/dc
 
 No external library is needed.
 
-##Limitations
+###Limitations
 
 Only these 4 types of quals and their boolean combinations can be 
 pushed down:

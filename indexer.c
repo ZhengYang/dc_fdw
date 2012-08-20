@@ -18,6 +18,7 @@
 #include "qual_pushdown.h"
 
 int cmpDocIds(const void *p1, const void *p2);
+void dumpIndex(HTAB *dict, File dictFile, File postFile);
 
 /*
  * function compare 2 posting entries, essentially integers
@@ -278,7 +279,7 @@ imIndex(char *datapath, char *indexpath)
  * Single-pass in-memory index function
  */
 int
-spimIndex(char *datapath, char *indexpath)
+spimIndex(char *datapath, char *indexpath, int buffer_size)
 {
     /* Data directory */
     DIR             *datadir;
@@ -297,9 +298,27 @@ spimIndex(char *datapath, char *indexpath)
     
     /* dictionary settings */
     HASHCTL         info;
+    HTAB            *DICT;
     HTAB            *dict;
     HASH_SEQ_STATUS status;
-    DictionaryEntry *dEntry;
+    PostingInfo     *dEntry;
+    
+    /* List of dict and postings file */
+    List *postfnames = NIL;
+    List *dictfnames = NIL;
+    File currDict;
+    File currPost;
+    
+    /* List of dictionaries in memory */
+    List *dicts = NIL;
+    
+    /* threshold for starting a new round (in bytes) */
+    int bufThreshold = (buffer_size == 0 ? DEFAULT_INDEX_BUFF_SIZE : buffer_size) * 1024 * 1024;
+    int bufCounter = 0;
+    /* index counter */
+    int iCounter = 0;
+    StringInfoData sidTmpDictPath;
+    StringInfoData sidTmpPostPath;
     
     /* index file cursors */
     int cursor = 0;
@@ -307,6 +326,7 @@ spimIndex(char *datapath, char *indexpath)
     /* stats and of dc */
     int dcNumOfFiles = 0;
     int dcNumOfBytes = 0;
+    int i;
     
 #ifdef DEBUG
     elog(NOTICE, "%s", "spimIndex");
@@ -316,6 +336,7 @@ spimIndex(char *datapath, char *indexpath)
     /* initialize hash dictionary */
     info.keysize = KEYSIZE;
     info.entrysize = sizeof(DictionaryEntry);
+    DICT = hash_create ("DICT", MAXELEM, &info, HASH_ELEM);
     dict = hash_create ("dict", MAXELEM, &info, HASH_ELEM);
     
     /* Initialize data path */
@@ -327,6 +348,8 @@ spimIndex(char *datapath, char *indexpath)
     }
     
     /* Initialize path strings */
+    initStringInfo(&sidTmpDictPath);
+    initStringInfo(&sidTmpPostPath);
     initStringInfo(&sidCurrFilePath);
     initStringInfo(&sidDictFilePath);
     initStringInfo(&sidPostFilePath);
@@ -343,6 +366,7 @@ spimIndex(char *datapath, char *indexpath)
     {
         int             fileSize;
         bool            found;
+        bool            foundGlobal;
         DictionaryEntry *re;
         Oid             cfgId;
         TSVector        tsvector;
@@ -354,21 +378,39 @@ spimIndex(char *datapath, char *indexpath)
         elog(NOTICE, "-FILE NAME: %s", dirent->d_name);
 #endif /* DEBUG */
         
+        if (bufCounter > bufThreshold)
+        {   
+            StringInfoData sidTmpDictPath;
+            StringInfoData sidTmpPostPath;
+            initStringInfo(&sidTmpDictPath);
+            initStringInfo(&sidTmpPostPath);
+            appendStringInfo(&sidTmpDictPath, "%s/%d.dict", indexpath, iCounter);
+            appendStringInfo(&sidTmpPostPath, "%s/%d.post", indexpath, iCounter);
+            elog(NOTICE, "I_DFILES:%s", sidTmpDictPath.data);
+            /* serialize current buffer */
+            currDict = PathNameOpenFile(sidTmpDictPath.data, O_RDWR | O_CREAT,  mode);
+            currPost = PathNameOpenFile(sidTmpPostPath.data, O_RDWR | O_CREAT,  mode);
+            dumpIndex(dict, currDict, currPost);
+            hash_destroy(dict);
+            dictfnames = lappend(dictfnames, (void *) sidTmpDictPath.data);
+            postfnames = lappend(postfnames, (void *) sidTmpPostPath.data);
+            /* start a new round */
+            dict = hash_create ("dict", MAXELEM, &info, HASH_ELEM);
+            /* reset counter */
+            bufCounter = 0;
+            iCounter ++;
+        }
         /* 
          * concat path and fname to full file name
          * (ignore . and ..)
          */
         if (strcmp(".", dirent->d_name) == 0) continue;
         if (strcmp("..", dirent->d_name) == 0) continue;
-        
+
         resetStringInfo(&sidCurrFilePath);
         appendStringInfo(&sidCurrFilePath, "%s/%s", datapath, dirent->d_name);
 
-#ifdef DEBUG
-        elog(NOTICE, "-CURR FILE NAME: %s", sidCurrFilePath.data);
-#endif
 
-        
         /*
          * 1. open file for processing
          * 2. seek to the end and get the length of the file
@@ -382,7 +424,7 @@ spimIndex(char *datapath, char *indexpath)
         fileContentBuf = (char *) palloc(sizeof(char) * (fileSize + 1) );
         FileRead(currFile, fileContentBuf, fileSize);
         fileContentBuf[fileSize] = 0;
-        
+
         /*
          * tokenization:
          * 1. Parse current document into a TSVector
@@ -394,14 +436,15 @@ spimIndex(char *datapath, char *indexpath)
         curentryptr = ARRPTR(tsvector);
         for (o = 0; o < tsvector->size; o++) {
             StringInfoData sidToken;
-            
+
             initStringInfo (&sidToken);
             appendBinaryStringInfo(&sidToken, lexemesptr + curentryptr->pos, curentryptr->len);
 #ifdef DEBUG
-            elog(NOTICE, "--TOKEN: %s", sidToken.data);
+            //elog(NOTICE, "--TOKEN: %s", sidToken.data);
 #endif
             /* search in the dictionary hash table to see if the entry already exists */
             re = (DictionaryEntry *) hash_search(dict, (void *) sidToken.data, HASH_ENTER, &found);
+            hash_search(DICT, (void *) sidToken.data, HASH_ENTER, &foundGlobal);
             if (found == TRUE) /* term appears in the dictionary */
             {
                 re->plist = lappend_int(re->plist, atoi(dirent->d_name));
@@ -414,8 +457,11 @@ spimIndex(char *datapath, char *indexpath)
         re = (DictionaryEntry *) hash_search(dict, ALL, HASH_ENTER, &found);
         if (found == TRUE)
             re->plist = lappend_int(re->plist, atoi(dirent->d_name)); 
-        else
+        else {
             re->plist = list_make1_int( atoi(dirent->d_name) );
+            hash_search(DICT, ALL, HASH_ENTER, &foundGlobal);
+        }
+        
 
         /*
          *  Clean-up:
@@ -427,6 +473,8 @@ spimIndex(char *datapath, char *indexpath)
         pfree(tsvector);
         FileClose(currFile);
         
+        bufCounter += fileSize;
+        
         /*
          * document collection size counter
          */
@@ -434,13 +482,26 @@ spimIndex(char *datapath, char *indexpath)
         dcNumOfFiles ++;
     }
     
+    /* serialize the remaining */
+    initStringInfo(&sidTmpDictPath);
+    initStringInfo(&sidTmpPostPath);
+    appendStringInfo(&sidTmpDictPath, "%s/%d.dict", indexpath, iCounter);
+    appendStringInfo(&sidTmpPostPath, "%s/%d.post", indexpath, iCounter);
+    
+    currDict = PathNameOpenFile(sidTmpDictPath.data, O_RDWR | O_CREAT,  mode);
+    currPost = PathNameOpenFile(sidTmpPostPath.data, O_RDWR | O_CREAT,  mode);
+    dumpIndex(dict, currDict, currPost);
+    hash_destroy(dict);
+    dictfnames = lappend(dictfnames, (void *) sidTmpDictPath.data);
+    postfnames = lappend(postfnames, (void *) sidTmpPostPath.data);
+    
 #ifdef DEBUG
     elog(NOTICE, "NUM OF FILES: %d", dcNumOfFiles);
 #endif
 
     
     /*
-     * Dumping hashtable into index file
+     * iterate keys in global dict and retrieve the postings
      */
 #ifdef DEBUG
         elog(NOTICE, "-DICT FILE NAME: %s", sidDictFilePath.data);
@@ -448,8 +509,119 @@ spimIndex(char *datapath, char *indexpath)
 #endif
     dictFile = PathNameOpenFile(sidDictFilePath.data, O_RDWR | O_CREAT,  0666);
     postFile = PathNameOpenFile(sidPostFilePath.data, O_RDWR | O_CREAT,  0666);
+    /* open dicts one by one */
+    for(i = 0; i < list_length(dictfnames); i++)
+    {
+        HTAB *currdict;
+        
+        char *dfname = (char *) list_nth(dictfnames, i);
+        File currdfile = PathNameOpenFile(dfname, O_RDONLY,  0666);
+        loadDict(&currdict, currdfile);
+        FileClose(currdfile);
+        dicts = lappend(dicts, currdict);
+    }
     
     /* iterate keys */
+    hash_seq_init(&status, DICT);
+    while ((dEntry = (PostingInfo *) hash_seq_search(&status)) != NULL)
+	{
+	    ListCell    *cell;
+        StringInfoData sidPostList;
+        StringInfoData sidDictEntry;
+        List *plist = NIL;
+        int *slist;
+        int *slistCurr;
+        int i;
+
+#ifdef DEBUG
+        //elog(NOTICE, "--DICT ENTRY:%s", dEntry->key);
+#endif		
+        for(i = 0; i < list_length(dicts); i++)
+        {
+            char *pfname = (char *) list_nth(postfnames, i);
+            File currpfile = PathNameOpenFile(pfname, O_RDONLY,  0666);
+            plist = list_concat(plist, searchTerm(dEntry->key, (HTAB *) list_nth(dicts, i), currpfile, FALSE, TRUE));
+            FileClose(currpfile);
+        }
+            
+        /* sort postings list by doc_id */
+        slist = (int *) palloc(list_length(plist) * sizeof(int));
+        slistCurr = slist;
+        foreach(cell, plist)
+        {
+            *slistCurr = lfirst_int(cell);
+            slistCurr ++;
+        }
+        qsort((void *) slist, list_length(plist), sizeof(int), cmpDocIds);
+        
+        /* write postings list */
+        initStringInfo(&sidPostList);
+        /* serialize the list into a string of integers */
+        for (slistCurr = slist; slistCurr < slist + list_length(plist); slistCurr ++)
+            appendStringInfo(&sidPostList, "%d ", *slistCurr);
+        
+        FileWrite (postFile, sidPostList.data, sidPostList.len);
+	    
+	     /* write dict entry */
+        initStringInfo(&sidDictEntry);
+        appendStringInfo(&sidDictEntry, "%s %d %d\n", dEntry->key, cursor, sidPostList.len);
+        FileWrite (dictFile, sidDictEntry.data, sidDictEntry.len);
+	    /* increase cursor */
+	    cursor += sidPostList.len;
+#ifdef DEBUG
+        elog(NOTICE, "%s", sidPostList.data);
+#endif
+        pfree(slist);
+        list_free(plist);
+	}
+    
+    /* clean up handles, buffer and remove tmpfiles */
+    for(i = 0; i < list_length(postfnames); i++)
+    {
+        char *pfname = (char *) list_nth(postfnames, i);
+        char *dfname = (char *) list_nth(dictfnames, i);
+        remove(pfname);
+        remove(dfname);
+    }
+    FileClose(dictFile);
+    FileClose(postFile);
+    FreeDir(datadir);
+    list_free(postfnames);
+    list_free(dictfnames);
+    /*
+     * Collection stats information
+     */
+#ifdef DEBUG
+        elog(NOTICE, "-STATS FILE NAME: %s", sidStatFilePath.data);
+#endif
+    statFile = PathNameOpenFile(sidStatFilePath.data, O_RDWR | O_CREAT,  0666);
+    
+    /* number of documents in the doc collection */
+    initStringInfo(&sidStatLine);
+    appendStringInfo(&sidStatLine, "NUM_OF_DOCS:%d\n", dcNumOfFiles);
+    FileWrite (statFile, sidStatLine.data, sidStatLine.len);
+    
+    /* number of bytes in the doc collection */
+    resetStringInfo(&sidStatLine);
+    appendStringInfo(&sidStatLine, "NUM_OF_BYTES:%d", dcNumOfBytes);
+    FileWrite (statFile, sidStatLine.data, sidStatLine.len);
+    
+    FileClose(statFile);	
+    return 0;
+}
+
+/*
+ * dump an in-memory hashtable to the disk
+ */
+void
+dumpIndex(HTAB *dict, File dictFile, File postFile)
+{
+    HASH_SEQ_STATUS status;
+    DictionaryEntry *dEntry;
+    int cursor = 0;
+#ifdef DEBUG
+    elog(NOTICE, "dumpIndex");
+#endif    
     hash_seq_init(&status, dict);
     while ((dEntry = (DictionaryEntry *) hash_seq_search(&status)) != NULL)
 	{
@@ -461,8 +633,7 @@ spimIndex(char *datapath, char *indexpath)
 
 #ifdef DEBUG
         elog(NOTICE, "--DICT ENTRY:%s", dEntry->key);
-#endif		
-        
+#endif
         /* sort postings list by doc_id */
         slist = (int *) palloc(list_length(dEntry->plist) * sizeof(int));
         slistCurr = slist;
@@ -488,33 +659,10 @@ spimIndex(char *datapath, char *indexpath)
 	    /* increase cursor */
 	    cursor += sidPostList.len;
 #ifdef DEBUG
-        elog(NOTICE, "%s", sidPostList.data);
+        elog(NOTICE, "plist:%s", sidPostList.data);
 #endif
         pfree(slist);
 	}
-    
     FileClose(dictFile);
     FileClose(postFile);
-    FreeDir(datadir);
-    
-    /*
-     * Collection stats information
-     */
-#ifdef DEBUG
-        elog(NOTICE, "-STATS FILE NAME: %s", sidStatFilePath.data);
-#endif
-    statFile = PathNameOpenFile(sidStatFilePath.data, O_RDWR | O_CREAT,  0666);
-    
-    /* number of documents in the doc collection */
-    initStringInfo(&sidStatLine);
-    appendStringInfo(&sidStatLine, "NUM_OF_DOCS:%d\n", dcNumOfFiles);
-    FileWrite (statFile, sidStatLine.data, sidStatLine.len);
-    
-    /* number of bytes in the doc collection */
-    resetStringInfo(&sidStatLine);
-    appendStringInfo(&sidStatLine, "NUM_OF_BYTES:%d", dcNumOfBytes);
-    FileWrite (statFile, sidStatLine.data, sidStatLine.len);
-    
-    FileClose(statFile);	
-    return 0;
 }

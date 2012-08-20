@@ -155,12 +155,17 @@ loadDict(HTAB **dict, File dfile)
     char            *token;
     PostingInfo     *re;
     StringInfoData  sidTerm;
+    HASHCTL         info;
     int ptr = 0;            /* pointer to start position */
     int o = 0;
     
 #ifdef DEBUG
     elog(NOTICE, "loadDict");
 #endif
+    
+    info.keysize = KEYSIZE;
+    info.entrysize = sizeof(PostingInfo);
+    *dict = hash_create ("loaddict", MAXELEM, &info, HASH_ELEM);
     
     /* load file content into buffer */
     sz = FileSeek(dfile, 0, SEEK_END);
@@ -408,7 +413,7 @@ pNegate(List *list, List *allList)
  * retrive postings list by searching a term
  */
 List *
-searchTerm(char *text, HTAB * dict, File pfile, bool isALL)
+searchTerm(char *text, HTAB * dict, File pfile, bool isALL, bool indexing)
 {
     List *rList = NIL;
     bool found;
@@ -427,7 +432,7 @@ searchTerm(char *text, HTAB * dict, File pfile, bool isALL)
     elog(NOTICE, "Term:%s", term);
 #endif
     
-    if (!isALL)
+    if (!isALL && !indexing)
     {
         /* normalize term to root form */
         cfgId = getTSCurrentConfig(true);
@@ -438,10 +443,8 @@ searchTerm(char *text, HTAB * dict, File pfile, bool isALL)
         appendBinaryStringInfo (&str, lexemesptr + curentryptr->pos, curentryptr->len);
         term = str.data;
     }
-    
     /* search term in the dictionary */
     re = (PostingInfo *) hash_search(dict, (void *) term, HASH_FIND, &found);   
-    
     if (found)
     {
         /* load postings file */
@@ -482,7 +485,7 @@ evalQualTree(PushableQualNode *node, HTAB *dict, File pfile, List *allList)
     if (strcmp(node->optype.data, "op_node") == 0)
     {
         if ( strcmp( node->opname.data, "@@" ) == 0)
-            rList = searchTerm(node->rightOperand.data, dict, pfile, FALSE);
+            rList = searchTerm(node->rightOperand.data, dict, pfile, FALSE, FALSE);
         else if ( strcmp( node->opname.data, "=" ) == 0)
             rList = list_make1_int( atoi(node->rightOperand.data) );
     }

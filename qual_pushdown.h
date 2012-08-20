@@ -38,10 +38,11 @@
 
 
 /* Debug mode flag */
-#define DEBUG
+/* #define DEBUG*/
 
 #define KEYSIZE 100000  /* hash key length in bytes */
 #define MAXELEM 100     /* maximum number of elements expected */
+#define DEFAULT_INDEX_BUFF_SIZE 1 /* 1MB for default buffer size */
 #define ALL "ALL"       /* term representing a global posting list */
 
 /*
@@ -73,7 +74,7 @@ typedef struct CollectionStats {
 
 /* index utility */
 int imIndex(char *datapath, char *indexpath);
-int spimIndex(char *datapath, char *indexpath);
+int spimIndex(char *datapath, char *indexpath, int buffer_size);
 
 /* search utility */
 File openStat (char *indexpath);
@@ -91,7 +92,7 @@ int loadStat(CollectionStats **stats, File sfile);
 int loadDoc(char **buf, File file);
 
 List * evalQualTree(PushableQualNode *node, HTAB *dict, File pfile, List *allList);
-List * searchTerm(char *term, HTAB *dict, File pfile, bool isALL);
+List * searchTerm(char *term, HTAB *dict, File pfile, bool isALL, bool indexing);
 List * pIntersect(List *list1, List *list2);
 List * pIntersectNot(List *list1, List *list2);
 List * pUnion(List *list1, List *list2);

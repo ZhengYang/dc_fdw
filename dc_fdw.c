@@ -16,7 +16,7 @@
  */
 
 /* Debug mode flag */
-#define DEBUG
+/*#define DEBUG*/
  
 #include "postgres.h"
 
@@ -69,6 +69,10 @@ static struct DcFdwOption valid_options[] = {
 	{"data_dir", ForeignTableRelationId},
 	/* where the index file located */
 	{"index_dir", ForeignTableRelationId},
+	/* the indexing method used: (IM, SPIM) */
+	{"index_method", ForeignTableRelationId},
+	/* buffer size for SPIM in MB */
+	{"buffer_size", ForeignTableRelationId},
 	
 	/* column mapping options */
 	{"id_col", ForeignTableRelationId},
@@ -204,14 +208,16 @@ dc_fdw_handler(PG_FUNCTION_ARGS)
 Datum
 dc_fdw_validator(PG_FUNCTION_ARGS)
 {
-	List	   *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
-	Oid			catalog = PG_GETARG_OID(1);
-	char	   *data_dir = NULL;
-    char       *index_dir = NULL;
-    char	   *id_col = NULL;
-    char       *text_col = NULL;
-	List	   *other_options = NIL;
-	ListCell   *cell;
+	List        *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
+	Oid	        catalog = PG_GETARG_OID(1);
+	char        *data_dir = NULL;
+    char        *index_dir = NULL;
+    char        *index_method = NULL;
+    char        *buffer_size = NULL;
+    char        *id_col = NULL;
+    char        *text_col = NULL;
+	List        *other_options = NIL;
+	ListCell    *cell;
 
 #ifdef DEBUG
     elog(NOTICE, "dc_fdw_validator");
@@ -267,7 +273,6 @@ dc_fdw_validator(PG_FUNCTION_ARGS)
 					 errhint("Valid options in this context are: %s",
 							 buf.data)));
 		}
-
 		if (strcmp(def->defname, "data_dir") == 0)
 		{
 			if (data_dir)
@@ -284,6 +289,34 @@ dc_fdw_validator(PG_FUNCTION_ARGS)
 						(errcode(ERRCODE_SYNTAX_ERROR),
 						 errmsg("redundant options")));
 			index_dir = defGetString(def);
+		}
+		
+		if (strcmp(def->defname, "index_method") == 0)
+		{
+			if (index_method)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("redundant options")));
+			if (strcmp(defGetString(def), "IM") != 0 && strcmp(defGetString(def), "SPIM") != 0)
+			    ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("invalid index_method options \"%s\"", defGetString(def)),
+						 errhint("Valid options in this context are: IM, SPIM")));
+			index_method = defGetString(def);
+		}
+		
+		if (strcmp(def->defname, "buffer_size") == 0)
+		{
+			if (buffer_size)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("redundant options")));
+			if (atoi(defGetString(def)) == 0)
+         		ereport(ERROR,
+         				(errcode(ERRCODE_SYNTAX_ERROR),
+         				errmsg("invalid buffer_size options \"%s\"", defGetString(def)),
+         				errhint("buffer size needs to be a integer in MB")));
+			buffer_size = defGetString(def);
 		}
 		
 		if (strcmp(def->defname, "id_col") == 0)
@@ -307,9 +340,9 @@ dc_fdw_validator(PG_FUNCTION_ARGS)
 		    /* essentially all column mapping options which are optional */
 			other_options = lappend(other_options, def);
 	}
-
+	
 	/*
-	 * data_dir & index_dir options are required for dc_fdw foreign tables.
+	 * options are required for dc_fdw foreign tables.
 	 */
 	if (catalog == ForeignTableRelationId && data_dir == NULL)
 		ereport(ERROR,
@@ -319,6 +352,10 @@ dc_fdw_validator(PG_FUNCTION_ARGS)
          ereport(ERROR,
          		(errcode(ERRCODE_FDW_DYNAMIC_PARAMETER_VALUE_NEEDED),
          		errmsg("index_dir is required for dc_fdw foreign tables")));
+    if (catalog == ForeignTableRelationId && index_method == NULL)
+        ereport(ERROR,
+                (errcode(ERRCODE_FDW_DYNAMIC_PARAMETER_VALUE_NEEDED),
+                errmsg("index_method is required for dc_fdw foreign tables")));
     if (catalog == ForeignTableRelationId && id_col == NULL)
         ereport(ERROR,
                 (errcode(ERRCODE_FDW_DYNAMIC_PARAMETER_VALUE_NEEDED),
@@ -339,9 +376,13 @@ dc_fdw_validator(PG_FUNCTION_ARGS)
 	 * Call the index function only when ForeignTable is being created.
 	 */
 	if (catalog == ForeignTableRelationId) {
-	    elog(NOTICE, "%s", "-Creating Foreign Table...");
-	    elog(NOTICE, "%s", "-Start indexing document collection...");
-	    imIndex(data_dir, index_dir);
+	    elog(NOTICE, "%s", "-Start indexing document collection, this may take a while...");
+	    if (strcmp(index_method, "SPIM") == 0)
+	    {
+	        spimIndex(data_dir, index_dir, atoi(buffer_size));
+        }
+	    else if (strcmp(index_method, "IM") == 0)
+	        imIndex(data_dir, index_dir);
 	}
 	
 	PG_RETURN_VOID();
@@ -486,7 +527,6 @@ dcGetForeignRelSize(PlannerInfo *root,
     CollectionStats     *stats;
     /* dict settings */
     HTAB                *dict;
-    HASHCTL             info;
     /* qual eval */
     PushableQualNode    *qualRoot;
     List                *allList;
@@ -499,12 +539,6 @@ dcGetForeignRelSize(PlannerInfo *root,
      * init stats data
      */
     stats = (CollectionStats *) palloc(sizeof(CollectionStats));
-    /*
-     * initialize hash dictionary
-     */
-    info.keysize = KEYSIZE;
-    info.entrysize = sizeof(DictionaryEntry);
-    dict = hash_create("dict", MAXELEM, &info, HASH_ELEM);
     
     /*
 	 * Fetch options.  We only need filename at this point, but we might as
@@ -546,7 +580,7 @@ dcGetForeignRelSize(PlannerInfo *root,
      * Evaluate QualTree. Filtered doc_id list. 
 	 */
 	postFile = openPost(fpstate->index_dir);
-    allList = searchTerm(ALL, dict, postFile, TRUE);
+    allList = searchTerm(ALL, dict, postFile, TRUE, FALSE);
 	
 	/* no quals to push down */
 	if (extractQuals(&qualRoot, root, baserel, fpstate->mapping) == 0)
@@ -563,14 +597,13 @@ dcGetForeignRelSize(PlannerInfo *root,
 #ifdef DEBUG
         printQualTree(qualRoot, 1);
 #endif
+        freeQualTree(qualRoot);
     }
 
 #ifdef DEBUG
     elog(NOTICE, "rlist length:%d", list_length(fpstate->rlist));
 #endif
     closePost(postFile);
-    
-    freeQualTree(qualRoot);
 }
 
 

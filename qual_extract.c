@@ -116,60 +116,50 @@ deparseExpr(PushableQualNode *qual, Expr *node, PlannerInfo *root, List *mapping
 	{
 	    /* Supported quals */
 		case T_Const:
-		    elog(NOTICE, "T_Const");
 			return deparseConst(qual, (Const *) node, root, mapping);
 			break;
 		case T_BoolExpr:
-		    elog(NOTICE, "T_BoolExpr");
             return deparseBoolExpr(qual, (BoolExpr *) node, root, mapping);
 			break;
     	case T_OpExpr:
-    	    elog(NOTICE, "T_OpExpr");
     		return deparseOpExpr(qual, (OpExpr *) node, root, mapping);
     		break;
         case T_Var:
-		    elog(NOTICE, "T_Var");
 			return deparseVar(qual, (Var *) node, root, mapping);
     		break;
     	case T_FuncExpr:
-            elog(NOTICE, "T_FuncExpr");
             return deparseFuncExpr(qual, (FuncExpr *) node, root, mapping);
             break;
     	/* Unsupported quals */
 		case T_NullTest:
-		    elog(NOTICE, "T_NullTest: not pushable");
             return -1;
 			break;
 		case T_DistinctExpr:
-		    elog(NOTICE, "T_DistinctExpr: not pushable");
             return -1;
 			break;
 		case T_RelabelType:
-		    elog(NOTICE, "T_RelabelType: not pushable");
             return -1;
 			break;
 		case T_Param:
-		    elog(NOTICE, "T_Param: not pushable");
             return -1;
 			break;
 		case T_ScalarArrayOpExpr:
-		    elog(NOTICE, "T_ScalarArrayOpExpr: not pushable");
             return -1;
 			break;
 		case T_ArrayRef:
-		    elog(NOTICE, "T_ArrayRef: not pushable");
             return -1;
 			break;
 		case T_ArrayExpr:
-		    elog(NOTICE, "T_ArrayExpr: not pushable");
             return -1;
 			break;
 		default:
+		/*
 			{
 				ereport(ERROR,
 						(errmsg("unsupported expression for deparse"),
 						 errdetail("%s", nodeToString(node))));
 			}
+		*/
             return -1;
 			break;
 	}
@@ -471,18 +461,15 @@ deparseFuncExpr(PushableQualNode *qual,
                 QTNode *qtTree;
 				appendStringInfo(&buf, ", ");
 			    deparseExpr(subtree, lfirst(arg), root, mapping);
-                elog(NOTICE, "subtree:%s", subtree->rightOperand.data);
                 if (strcmp(funcname, "to_tsquery") == 0)
 		            tsquery = (TSQuery) DirectFunctionCall1( to_tsquery, PointerGetDatum(cstring_to_text(subtree->rightOperand.data)) );
 		        else
 		            tsquery = (TSQuery) DirectFunctionCall1( plainto_tsquery, PointerGetDatum(cstring_to_text(subtree->rightOperand.data)) );
-		        elog(NOTICE, "subtree1:%s", subtree->rightOperand.data);
 		        qtTree = QT2QTN(GETQUERY(tsquery), GETOPERAND(tsquery));
-		        elog(NOTICE, "subtree2:%s", subtree->rightOperand.data);
                 copyTree(qtTree, qual, mapping);
-                elog(NOTICE, "subtree3:%s", subtree->rightOperand.data);
+#ifdef DEBUG
                 printQualTree(qual, 4);
-                elog(NOTICE, "subtree4:%s", subtree->rightOperand.data);
+#endif
             }
             return 0;
 	    }
@@ -498,7 +485,9 @@ deparseFuncExpr(PushableQualNode *qual,
 	{
 		deparseExpr(qual, linitial(node->args), root, mapping);
 	}
+#ifdef DEBUG
     elog(NOTICE, "FUNC:%s", buf.data);
+#endif
     return -1;
 }
 

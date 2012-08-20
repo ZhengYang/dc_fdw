@@ -60,6 +60,9 @@ extractQuals(PushableQualNode **qualRoot, PlannerInfo *root, RelOptInfo *baserel
     int         pushableQualCounter = 0;
     *qualRoot = (PushableQualNode *) palloc(sizeof(PushableQualNode));
     
+#ifdef DEBUG
+    elog(NOTICE, "extractQuals");
+#endif    
 	/*
 	 * Items in baserestrictinfo list are ANDed
 	 */
@@ -92,6 +95,7 @@ extractQuals(PushableQualNode **qualRoot, PlannerInfo *root, RelOptInfo *baserel
 	            initStringInfo(&boolNode->optype);
 	            appendStringInfo(&boolNode->opname, "%s", "AND");
 	            appendStringInfo(&boolNode->optype, "%s", "bool_node");
+                boolNode->childNodes = NIL;
                 boolNode->childNodes = lappend(boolNode->childNodes, *qualRoot);
                 boolNode->childNodes = lappend(boolNode->childNodes, qualCurr);
                 *qualRoot = boolNode;
@@ -181,6 +185,9 @@ deparseVar(PushableQualNode *qual,
 	List		   *options;
 	ListCell	   *lc;
 
+#ifdef DEBUG
+    elog(NOTICE, "deparseVar");
+#endif
 	/* node must not be any of OUTER_VAR,INNER_VAR and INDEX_VAR. */
 	Assert(node->varno >= 1 && node->varno <= root->simple_rel_array_size);
 
@@ -265,6 +272,10 @@ deparseConst(PushableQualNode *qual,
 	char	   *extval;
 	bool		isfloat = false;
 
+#ifdef DEBUG
+    elog(NOTICE, "deparseConst");
+#endif
+
 	if (node->constisnull)
 	{
         elog(NOTICE, "Const Null is unsupported!");
@@ -289,7 +300,6 @@ deparseConst(PushableQualNode *qual,
         getTypeOutputInfo(node->consttype,
     					  &typoutput, &typIsVarlena);
     	extval = OidOutputFunctionCall(typoutput, node->constvalue);
-    	
     	switch (node->consttype)
     	{
     		case ANYARRAYOID:
@@ -319,7 +329,7 @@ deparseConst(PushableQualNode *qual,
     						isfloat = true;	/* it looks like a float */
     				}
     				else
-    					appendStringInfo(&qual->rightOperand, "'%s'", extval);
+    					appendStringInfo(&qual->rightOperand, "%s", extval);
     			}
     			break;
     		case BITOID:
@@ -364,6 +374,10 @@ deparseBoolExpr(PushableQualNode *qual,
 {
 	ListCell   *lc;
 
+#ifdef DEBUG
+    elog(NOTICE, "deparseBoolExpr");
+#endif
+
     /* constrcut a bool op node as root for local subtree */
 	switch (node->boolop)
 	{
@@ -394,6 +408,7 @@ deparseBoolExpr(PushableQualNode *qual,
     if (strcmp(qual->opname.data, "NOT") == 0)
     {
         PushableQualNode *subtree = (PushableQualNode *) palloc(sizeof(PushableQualNode));
+        subtree->childNodes = NIL;
         if (deparseExpr(subtree, list_nth(node->args, 0), root, mapping) == 0)
         {
             qual->childNodes = lappend(qual->childNodes, subtree);
@@ -406,6 +421,7 @@ deparseBoolExpr(PushableQualNode *qual,
 	    foreach(lc, node->args)
 	    {
 	        PushableQualNode *subtree = (PushableQualNode *) palloc(sizeof(PushableQualNode));
+	        subtree->childNodes = NIL;
     		if (deparseExpr(subtree, (Expr *) lfirst(lc), root, mapping) == 0)
     		    qual->childNodes = lappend(qual->childNodes, subtree);
     		else
@@ -437,6 +453,10 @@ deparseFuncExpr(PushableQualNode *qual,
 	ListCell	   *arg;
     StringInfoData  buf;
     TSQuery         tsquery;
+
+#ifdef DEBUG
+    elog(NOTICE, "deparseFuncExpr");
+#endif
     
     initStringInfo(&buf);
     
@@ -454,6 +474,7 @@ deparseFuncExpr(PushableQualNode *qual,
 	        (strcmp(funcname, "to_tsquery") == 0 || strcmp(funcname, "plainto_tsquery") == 0))
 	    {
 		    PushableQualNode *subtree = (PushableQualNode *) palloc(sizeof(PushableQualNode));
+            subtree->childNodes = NIL;
             initStringInfo(&subtree->opname);
             initStringInfo(&subtree->optype);
             appendStringInfo(&subtree->opname, "%s", funcname);
@@ -512,6 +533,10 @@ deparseOpExpr(PushableQualNode *qual,
 	char		oprkind;
 	ListCell   *arg;
 
+#ifdef DEBUG
+    elog(NOTICE, "deparseOpExpr");
+#endif
+
 	/* Retrieve necessary information about the operator from system catalog. */
 	tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(node->opno));
 	if (!HeapTupleIsValid(tuple))
@@ -567,7 +592,11 @@ printQualTree(PushableQualNode *qualRoot, int indentLevel)
     ListCell        *lc;
     StringInfoData  indentStr;
     int             i;
-    
+
+#ifdef DEBUG
+    elog(NOTICE, "printQualTree");
+#endif
+
     initStringInfo(&indentStr);
     
     for (i=0; i<indentLevel; i++)
@@ -618,6 +647,10 @@ copyTree(QTNode *qtTree, PushableQualNode *pqTree, List *mapping)
     int n;
     QueryItem * queryItem = qtTree->valnode;
     
+#ifdef DEBUG
+    elog(NOTICE, "copyTree");
+#endif
+  
     if (queryItem->type == QI_VAL)
     {
         initStringInfo(&pqTree->optype);

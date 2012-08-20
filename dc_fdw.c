@@ -550,7 +550,7 @@ dcGetForeignRelSize(PlannerInfo *root,
 	                &fpstate->index_dir,
 	                &fpstate->mapping);
 	baserel->fdw_private = (void *) fpstate;
-    
+
     /*
      * Fetch collection-wise stats
      */
@@ -558,7 +558,7 @@ dcGetForeignRelSize(PlannerInfo *root,
     loadStat(&stats, statFile);
     closeStat(statFile);
     fpstate->stats = stats;
-    
+
     /*
      * fill in dc size information
      */
@@ -572,7 +572,7 @@ dcGetForeignRelSize(PlannerInfo *root,
     dictFile = openDict(fpstate->index_dir);
 	loadDict(&dict, dictFile);
     closeDict(dictFile);
-    
+
     /*
      * Extract Quals. We only extract quals that we can push down and 
  	 * convert them into a tree structure for evaluation.
@@ -581,7 +581,7 @@ dcGetForeignRelSize(PlannerInfo *root,
 	 */
 	postFile = openPost(fpstate->index_dir);
     allList = searchTerm(ALL, dict, postFile, TRUE, FALSE);
-	
+
 	/* no quals to push down */
 	if (extractQuals(&qualRoot, root, baserel, fpstate->mapping) == 0)
 	{
@@ -898,6 +898,7 @@ dcAnalyzeForeignTable(Relation relation,
     elog(NOTICE, "dcAnalyzeForeignTable");
 #endif
 
+    stats = (CollectionStats *) palloc(sizeof(CollectionStats));
 	/* Fetch options of foreign table */
 	dcGetOptions(RelationGetRelid(relation),
 	        &data_dir, &index_dir, &mappings);

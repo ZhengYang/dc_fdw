@@ -7,7 +7,7 @@ the document collection on local disk.
 More information can be found in the [wiki page](https://github.com/ZhengYang/dc_fdw/wiki)
 
 
-##Building
+###Building
 
 No external library is needed.
 
@@ -17,13 +17,13 @@ Only these 4 types of quals and their boolean combinations can be
 pushed down:
 
 1. id = \< integer \>
-2. content @@ << term >>
-3. to_tsquery ( << tsquery text >> )
-4. plainto_tsquery ( << free text >> )
+2. content @@ \< term \>
+3. to_tsquery ( \< tsquery text \> )
+4. plainto_tsquery ( \< free text \> )
 
 Otherwise, a sequential scan on all the documents in the collection is expected.
 
-##Usage
+###Usage
 
 The following parameters can be set on a CouchDB foreign server:
 
@@ -34,7 +34,7 @@ The following parameters can be set on a CouchDB foreign server:
 	id_col        [the column name for mapping doc id]
 	text_col      [the column name for mapping doc content]
 
-##Example
+###Example
 
 	CREATE EXTENSION dc_fdw;
 

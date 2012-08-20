@@ -21,8 +21,8 @@ pushed down:
 
 1. id = << integer >>
 2. content @@ << term >>
-3. to_tsquery(<< tsquery text >>)
-4. plainto_tsquery(<< free text >>)
+3. to_tsquery ( << tsquery text >> )
+4. plainto_tsquery ( << free text >> )
 
 Otherwise, a sequential scan on all the documents in the collection is expected.
 
@@ -56,6 +56,5 @@ The following parameters can be set on a CouchDB foreign server:
 	    );
 
 -- 
-Zheng Yang
-
+Zheng Yang  
 zhengyang4k@gmail.com

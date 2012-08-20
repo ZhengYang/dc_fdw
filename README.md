@@ -11,15 +11,12 @@ More information can be found in the [wiki page](https://github.com/ZhengYang/dc
 
 No external library is needed.
 
-I've tested on Mac OS X 10.6 only, but other *nix's should also work.
-I haven't tested on Windows, but the code should be good on MinGW.
-
 ##Limitations
 
 Only these 4 types of quals and their boolean combinations can be 
 pushed down:
 
-1. id = << integer >>
+1. id = \< integer \>
 2. content @@ << term >>
 3. to_tsquery ( << tsquery text >> )
 4. plainto_tsquery ( << free text >> )

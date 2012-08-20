@@ -2554,6 +2554,17 @@ CREATE FOREIGN TABLE
        | 
 (13 rows)
 
+                                     QUERY PLAN                                      
+-------------------------------------------------------------------------------------
+ Foreign Scan on dc_table  (cost=0.00..1626.17 rows=8 width=36)
+   Filter: (content @@ 'Singapore'::text)
+   Foreign Document Collection: /pgsql/postgres/contrib/dc_fdw/data/reuters/training
+   Foreign Document Collection Size: 6478471
+   Number of Documents: 7769
+   Index Location: /pgsql/postgres/contrib/dc_fdw/data/reuters/index
+(6 rows)
+
+ANALYZE
  id | content 
 ----+---------
 (0 rows)
@@ -8932,6 +8943,93 @@ CREATE FOREIGN TABLE
        |                                                                                       +
        | 
 (131 rows)
+
+  id   |                              content                              
+-------+-------------------------------------------------------------------
+  1407 | NATIONAL PORK BOARD ALLOCATES 2.4 MLN DLRS                       +
+       |   The National Pork Board on Monday                              +
+       |   allocated 2.4 mln dlrs in discretionary funds, collected from  +
+       |   the 100 pct national checkoff program, to three industry       +
+       |   organizations.                                                 +
+       |       The National Pork Producers Council, NPPC, will receive    +
+       |   almost 1.8 mln dlrs for use in the areas of food service,      +
+       |   consumer education and marketing. In addition the board        +
+       |   allocated 375,000 dlrs in use in "Pork - The Other White Meat" +
+       |   campaign, according to a Pork Board spokesperson.              +
+       |       The National Livestock and Meat Board will receive 644,000 +
+       |   dlrs to continue work in educating health care officials.      +
+       |   120,000 dlrs in matching funds will be provided to the meat    +
+       |   board for use in the development of a better market for        +
+       |   processed meats.                                               +
+       |       The Meat Export Federation was awarded 50,000 dlrs to      +
+       |   increase the market for chilled and processed U.S. pork in     +
+       |   Japan and Singapore. Retail stores in these two countries will +
+       |   be providing additional funding for the program.               +
+       |       A total of 5,000 dlrs for work in encouraging McDonalds to +
+       |   expand its McRib sandwich to Japan and Singapore was also      +
+       |   awarded to the Meat export Federation.                         +
+       |                                                                  +
+       |                                                                  +
+       | 
+ 12355 | COFFEE FUTURES UNDER DLR A POUND AT SIX-YEAR LOW                 +
+       |   Coffee futures dipped further and closed                       +
+       |   below one dlr a pound for the first time in six years.         +
+       |       Coffee for delivery in May ended at 99.28 cents a pound on +
+       |   the New York Coffee, Sugar and Cocoa Exchange, down 0.76 cent  +
+       |   and the lowest price since August, 1981.                       +
+       |        Prices have fallen steadily since the International Coffee+
+       |   Organization failed in February to reach an agreement          +
+       |   controlling exports by its members, and pressure was renewed   +
+       |   this week as the executive board of the organization met in    +
+       |   London without reopening debate on its export quotas.          +
+       |       The executive board has limited its current discussions to +
+       |   administrative matters and is set to adourn Thursday.          +
+       |       Burdensome supplies have pressed the market down from 1.30 +
+       |   dlrs a pound in February, when the organization's discussions  +
+       |   aimed at re-establishing export quotas broke down.             +
+       |       Sandra Kaul, a coffee analyst in New York with Shearson    +
+       |   Lehman Brothers, said supplies currently are at their high     +
+       |   point for the year because most producing nations have just    +
+       |   completed their harvests.                                      +
+       |       In addition, she said, many of those nations are faced with+
+       |   serious debt and need to sell coffee to raise capital.         +
+       |       "This should keep substantial pressure on exporters to     +
+       |   undertake sales despite the drop in prices," she said.         +
+       |       Further, U.S. demand could be sluggish because winter, the +
+       |   period of greatest consumption, is ending. Prices could fall   +
+       |   another 10 to 15 cents a pound, analysts said.                 +
+       |       Gold futures retreated from modest early gains and closed  +
+       |   steady while silver prices rallied on the Commodity Exchange in+
+       |   New York.                                                      +
+       |       The increase in U.S. banks' prime rates prompted concern   +
+       |   about renewed inflation but the strength of the U.S. dollar    +
+       |   discouraged new buying.                                        +
+       |       "The market is getting mixed signals and it doesn't know   +
+       |   which way to go," one analyst said.                            +
+       |       Cattle futures posted new highs on the Chicago Mercantile  +
+       |   Exchange, while live hogs rallied from early losses and frozen +
+       |   pork bellies finished sharply lower.                           +
+       |       Cattle prices continued to draw support from the winter    +
+       |   storm that swept the Plains states, leaving animals stranded in+
+       |   snowbound fields and feed lots in miserable condition.         +
+       |       Live hogs were pressured early by the Agriculture          +
+       |   Department's report Tuesday that producers expanded their      +
+       |   breeding herds more than the market expected last quarter.     +
+       |   Prices recovered to keep pace with higher cash prices.         +
+       |       Frozen pork bellies fell sharply on the outlook for greater+
+       |   production and closed with limit losses.                       +
+       |       Soybean futures posted sharp gains on the Chicago Board of +
+       |   Trade, while corn and wheat were lower.                        +
+       |       Soybeans rallied in response to Tuesday's USDA report that +
+       |   farmers intend to plant 56.9 mln acres this year, down from    +
+       |   61.5 mln planted last year.                                    +
+       |       Corn prices were pressured by the outlook for 67.6 mln     +
+       |   acres of corn, which is down from last year's 76.7 mln acres,  +
+       |   but was larger than analysts expected.                         +
+       |                                                                  +
+       |                                                                  +
+       | 
+(2 rows)
 
   id  |                             content                              
 ------+------------------------------------------------------------------

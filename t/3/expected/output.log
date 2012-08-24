@@ -1,3 +1,4 @@
+SELECT * FROM dc_table WHERE id = 1;
  id |                              content                              
 ----+-------------------------------------------------------------------
   1 | BAHIA COCOA REVIEW                                               +
@@ -61,6 +62,7 @@
     | 
 (1 row)
 
+SELECT * FROM dc_table WHERE content @@ 'Singapore';
   id   |                                 content                                 
 -------+-------------------------------------------------------------------------
   1407 | NATIONAL PORK BOARD ALLOCATES 2.4 MLN DLRS                             +
@@ -1540,6 +1542,7 @@
        | 
 (48 rows)
 
+SELECT * FROM dc_table WHERE content @@ to_tsquery('Singapore & Japan');
   id   |                              content                               
 -------+--------------------------------------------------------------------
   1407 | NATIONAL PORK BOARD ALLOCATES 2.4 MLN DLRS                        +
@@ -2044,6 +2047,7 @@
        | 
 (13 rows)
 
+SELECT * FROM dc_table WHERE content @@ plainto_tsquery('Singapore Japan');
   id   |                              content                               
 -------+--------------------------------------------------------------------
   1407 | NATIONAL PORK BOARD ALLOCATES 2.4 MLN DLRS                        +
@@ -2548,21 +2552,25 @@
        | 
 (13 rows)
 
-                                     QUERY PLAN                                      
--------------------------------------------------------------------------------------
+EXPLAIN SELECT * FROM dc_table WHERE content @@ 'Singapore';
+                           QUERY PLAN                           
+----------------------------------------------------------------
  Foreign Scan on dc_table  (cost=0.00..1626.17 rows=8 width=36)
    Filter: (content @@ 'Singapore'::text)
-   Foreign Document Collection: /pgsql/postgres/contrib/dc_fdw/data/reuters/training
+   Foreign Document Collection: /tmp/dc_fdw/t/3/training
    Foreign Document Collection Size: 6478471
    Number of Documents: 7769
-   Index Location: /pgsql/postgres/contrib/dc_fdw/data/reuters/index
+   Index Location: /tmp/dc_fdw/t/3/index
 (6 rows)
 
+ANALYZE dc_table;
 ANALYZE
+SELECT * FROM dc_table WHERE id = 1 AND content @@ 'Singapore';
  id | content 
 ----+---------
 (0 rows)
 
+SELECT * FROM dc_table WHERE content @@ 'Singapore' AND content @@ 'Japan' AND content @@ 'China';
   id   |                              content                              
 -------+-------------------------------------------------------------------
  12849 | LONDON FREIGHT MARKET FEATURES USSR TIMECHARTERS                 +
@@ -2609,6 +2617,7 @@ ANALYZE
        | 
 (1 row)
 
+SELECT * FROM dc_table WHERE content @@ 'Singapore' OR content @@ 'Japan' AND content @@ 'China';
   id   |                                 content                                 
 -------+-------------------------------------------------------------------------
   1407 | NATIONAL PORK BOARD ALLOCATES 2.4 MLN DLRS                             +
@@ -4807,6 +4816,7 @@ ANALYZE
        | 
 (67 rows)
 
+SELECT * FROM dc_table WHERE content @@ to_tsquery('Singapore & Japan | China');
   id   |                                        content                                         
 -------+----------------------------------------------------------------------------------------
    180 | U.S. WHEAT BONUS TO SOVIET CALLED DORMANT                                             +
@@ -8938,6 +8948,7 @@ ANALYZE
        | 
 (131 rows)
 
+SELECT * FROM dc_table WHERE content @@ to_tsquery('(Singapore | National) & Pork & Board');
   id   |                              content                              
 -------+-------------------------------------------------------------------
   1407 | NATIONAL PORK BOARD ALLOCATES 2.4 MLN DLRS                       +
@@ -9025,6 +9036,7 @@ ANALYZE
        | 
 (2 rows)
 
+SELECT * FROM dc_table WHERE content @@ to_tsquery('National & Pork & Board') AND content @@ 'Singapore';
   id  |                             content                              
 ------+------------------------------------------------------------------
  1407 | NATIONAL PORK BOARD ALLOCATES 2.4 MLN DLRS                      +
@@ -9054,6 +9066,7 @@ ANALYZE
       | 
 (1 row)
 
+SELECT * FROM dc_table WHERE content @@ plainto_tsquery('Singapore Japan China');
   id   |                              content                              
 -------+-------------------------------------------------------------------
  12849 | LONDON FREIGHT MARKET FEATURES USSR TIMECHARTERS                 +
@@ -9100,6 +9113,7 @@ ANALYZE
        | 
 (1 row)
 
+SELECT * FROM dc_table WHERE content @@ plainto_tsquery('National Pork Board') AND content @@ 'Singapore';
   id  |                             content                              
 ------+------------------------------------------------------------------
  1407 | NATIONAL PORK BOARD ALLOCATES 2.4 MLN DLRS                      +

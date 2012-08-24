@@ -19,11 +19,13 @@ CREATE EXTENSION dc_fdw;
 CREATE SERVER dc_server 
 	FOREIGN DATA WRAPPER dc_fdw;
 
-CREATE FOREIGN TABLE dc_table (id text, title text, content text) 
+CREATE FOREIGN TABLE dc_table (id int, content text) 
 	SERVER dc_server
 	OPTIONS (
-	    data_dir '/pgsql/postgresql-9.1.3/contrib/dc_fdw/data/reuters/training', 
-    	index_dir '/pgsql/postgresql-9.1.3/contrib/dc_fdw/data/reuters/index',
-    	language 'en',
-    	encoding 'ascii'
+	    data_dir '/pgsql/postgres/contrib/dc_fdw/data/reuters/training', 
+    	index_dir '/pgsql/postgres/contrib/dc_fdw/data/reuters/index',
+    	index_method 'SPIM',
+    	buffer_size '10',
+    	id_col 'id',
+    	text_col 'content'
     );

@@ -16,7 +16,7 @@
  */
 
 /* Debug mode flag */
-#define DEBUG
+/*#define DEBUG*/
  
 #include "postgres.h"
 
@@ -27,9 +27,9 @@
 #include "catalog/pg_foreign_server.h"
 #include "catalog/pg_foreign_table.h"
 #include "catalog/pg_user_mapping.h"
-#include "commands/copy.h"
 #include "commands/defrem.h"
 #include "commands/explain.h"
+#include "commands/vacuum.h"
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
 #include "miscadmin.h"
@@ -37,12 +37,13 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
-#include "utils/rel.h"
 #include "optimizer/var.h"
+#include "utils/memutils.h"
+#include "utils/rel.h"
 
-#include "dc_indexer.h"
-#include "dc_searcher.h"
-#include "deparse.h"
+
+#include "qual_pushdown.h"
+#include "qual_extract.h"
 
 PG_MODULE_MAGIC;
 
@@ -68,10 +69,15 @@ static struct DcFdwOption valid_options[] = {
 	{"data_dir", ForeignTableRelationId},
 	/* where the index file located */
 	{"index_dir", ForeignTableRelationId},
+	/* the indexing method used: (IM, SPIM) */
+	{"index_method", ForeignTableRelationId},
+	/* buffer size for SPIM in MB */
+	{"buffer_size", ForeignTableRelationId},
 	
-	{"language", ForeignTableRelationId},
-	{"encoding", ForeignTableRelationId},
-
+	/* column mapping options */
+	{"id_col", ForeignTableRelationId},
+	{"text_col", ForeignTableRelationId},
+	
 	/* Sentinel */
 	{NULL, InvalidOid}
 };
@@ -81,14 +87,13 @@ static struct DcFdwOption valid_options[] = {
  */
 typedef struct DcFdwPlanState
 {
-	char        *data_dir;      /* documents to read */
-    char        *index_dir;     /* index to output */
-    char        *language;      /* language of the documents */
-    char        *encoding;      /* encoding of the documents */
-    List        *options;
-	BlockNumber pages;			/* estimate of file's physical size */
-    int         dc_size;        /* collection size in bytes */
-	int		    ndocs;		    /* estimate of number of rows in file */
+	char            *data_dir;      /* documents to read */
+    char            *index_dir;     /* index to output */
+    List            *mapping;       /* column mapping function */
+    CollectionStats *stats;         /* collection-wise stats */
+	BlockNumber     pages;			/* estimate of collection's physical size */
+	double		    ntuples;		/* estimate of number of rows in collection */
+    List *          rlist;          /* reduced list of doc ids by quals pushdown */
 } DcFdwPlanState;
 
 
@@ -97,11 +102,16 @@ typedef struct DcFdwPlanState
  */
 typedef struct DcFdwExecutionState
 {
-	char	   *data_dir;		    /* dc to read */
-    DIR        *dir_state;
-    AttInMetadata *attinmeta;
-    int         dc_size;        /* collection size in bytes */
-	int		    ndocs;		    /* estimate of number of rows in file */
+	char            *data_dir;	/* dc to read */
+    DIR             *dir_state; /* for sequential scan only */
+    AttInMetadata   *attinmeta;
+    CollectionStats *stats;     /* collection-wise stats */
+    int             dc_size;    /* collection size in bytes */
+	double          ntuples;	/* estimate of number of rows in file */
+    List            *rlist;     /* reduced list of doc ids by quals pushdown */
+    int             rlistptr;   /* for looping through the rList */
+    int             *mask;      /* mask for column mapping */
+    int             ncols;      /* number of columns in the table */   
 } DcFdwExecutionState;
 
 /*
@@ -142,17 +152,26 @@ static bool dcAnalyzeForeignTable(Relation relation,
  */
 static bool is_valid_option(const char *option, Oid context);
 static void dcGetOptions(Oid foreigntableid,
-			   char **data_dir, char **index_dir, char **language, char **encoding, List **other_options);
-static void estimate_size(PlannerInfo *root, RelOptInfo *baserel, 
-                DcFdwPlanState *fdw_private);
-static void estimate_costs(PlannerInfo *root, RelOptInfo *baserel,
-            	DcFdwPlanState *fdw_private,
-            	Cost *startup_cost, Cost *total_cost);
-static int dc_acquire_sample_rows(Relation onerel, int elevel,
-                HeapTuple *rows, int targrows,
-            	double *totalrows, double *totaldeadrows);
-
-
+                        char **data_dir,
+                        char **index_dir,
+                        List **col_mapping);
+static void estimate_size(PlannerInfo *root,
+                        RelOptInfo *baserel,
+                        DcFdwPlanState *fdw_private,
+                        CollectionStats *stats);
+static void estimate_costs(PlannerInfo *root,
+                        RelOptInfo *baserel,
+                        DcFdwPlanState *fdw_private,
+                        Cost *startup_cost,
+                        Cost *total_cost);
+static int dc_acquire_sample_rows(Relation onerel,
+                                int elevel,
+                                HeapTuple *rows,
+                                int targrows,
+                                double *totalrows,
+                                double *totaldeadrows);
+int dc_col_mapping_mask(Relation rel, List *mapping_list, int **mask);
+void cstring_tuple(Datum **tuple_as_array, bool **nulls, int *mask, int mask_len, List *values);
 
 /*
  * Foreign-data wrapper handler function: return a struct with pointers
@@ -167,7 +186,6 @@ dc_fdw_handler(PG_FUNCTION_ARGS)
     elog(NOTICE, "dc_fdw_handler");
 #endif
 
-	//fdwroutine->PlanForeignScan = dcPlanForeignScan;
 	fdwroutine->GetForeignRelSize = dcGetForeignRelSize;
     fdwroutine->GetForeignPaths = dcGetForeignPaths;
     fdwroutine->GetForeignPlan = dcGetForeignPlan;
@@ -190,14 +208,16 @@ dc_fdw_handler(PG_FUNCTION_ARGS)
 Datum
 dc_fdw_validator(PG_FUNCTION_ARGS)
 {
-	List	   *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
-	Oid			catalog = PG_GETARG_OID(1);
-	char	   *data_dir = NULL;
-    char       *index_dir = NULL;
-    char       *language = NULL;
-    char       *encoding = NULL;
-	List	   *other_options = NIL;
-	ListCell   *cell;
+	List        *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
+	Oid	        catalog = PG_GETARG_OID(1);
+	char        *data_dir = NULL;
+    char        *index_dir = NULL;
+    char        *index_method = NULL;
+    char        *buffer_size = NULL;
+    char        *id_col = NULL;
+    char        *text_col = NULL;
+	List        *other_options = NIL;
+	ListCell    *cell;
 
 #ifdef DEBUG
     elog(NOTICE, "dc_fdw_validator");
@@ -220,7 +240,7 @@ dc_fdw_validator(PG_FUNCTION_ARGS)
 	if (catalog == ForeignTableRelationId && !superuser())
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("only superuser can change options of a dc_fdw foreign table")));
+				 errmsg("Only superuser can change options of a dc_fdw foreign table")));
 
 	/*
 	 * Check that only options supported by dc_fdw, and allowed for the
@@ -253,7 +273,6 @@ dc_fdw_validator(PG_FUNCTION_ARGS)
 					 errhint("Valid options in this context are: %s",
 							 buf.data)));
 		}
-
 		if (strcmp(def->defname, "data_dir") == 0)
 		{
 			if (data_dir)
@@ -272,34 +291,79 @@ dc_fdw_validator(PG_FUNCTION_ARGS)
 			index_dir = defGetString(def);
 		}
 		
-		if (strcmp(def->defname, "language") == 0)
+		if (strcmp(def->defname, "index_method") == 0)
 		{
-			if (language)
+			if (index_method)
 				ereport(ERROR,
 						(errcode(ERRCODE_SYNTAX_ERROR),
 						 errmsg("redundant options")));
-			language = defGetString(def);
+			if (strcmp(defGetString(def), "IM") != 0 && strcmp(defGetString(def), "SPIM") != 0)
+			    ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("invalid index_method options \"%s\"", defGetString(def)),
+						 errhint("Valid options in this context are: IM, SPIM")));
+			index_method = defGetString(def);
 		}
 		
-		if (strcmp(def->defname, "encoding") == 0)
+		if (strcmp(def->defname, "buffer_size") == 0)
 		{
-			if (encoding)
+			if (buffer_size)
 				ereport(ERROR,
 						(errcode(ERRCODE_SYNTAX_ERROR),
 						 errmsg("redundant options")));
-			encoding = defGetString(def);
+			if (atoi(defGetString(def)) == 0)
+         		ereport(ERROR,
+         				(errcode(ERRCODE_SYNTAX_ERROR),
+         				errmsg("invalid buffer_size options \"%s\"", defGetString(def)),
+         				errhint("buffer size needs to be a integer in MB")));
+			buffer_size = defGetString(def);
+		}
+		
+		if (strcmp(def->defname, "id_col") == 0)
+		{
+			if (id_col)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("redundant options")));
+			id_col = defGetString(def);
+		}
+		
+		if (strcmp(def->defname, "text_col") == 0)
+		{
+			if (text_col)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("redundant options")));
+			text_col = defGetString(def);
 		}
 		else
+		    /* essentially all column mapping options which are optional */
 			other_options = lappend(other_options, def);
 	}
-
+	
 	/*
-	 * Dcname option is required for dc_fdw foreign tables.
+	 * options are required for dc_fdw foreign tables.
 	 */
 	if (catalog == ForeignTableRelationId && data_dir == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_DYNAMIC_PARAMETER_VALUE_NEEDED),
 				 errmsg("data_dir is required for dc_fdw foreign tables")));
+	if (catalog == ForeignTableRelationId && index_dir == NULL)
+         ereport(ERROR,
+         		(errcode(ERRCODE_FDW_DYNAMIC_PARAMETER_VALUE_NEEDED),
+         		errmsg("index_dir is required for dc_fdw foreign tables")));
+    if (catalog == ForeignTableRelationId && index_method == NULL)
+        ereport(ERROR,
+                (errcode(ERRCODE_FDW_DYNAMIC_PARAMETER_VALUE_NEEDED),
+                errmsg("index_method is required for dc_fdw foreign tables")));
+    if (catalog == ForeignTableRelationId && id_col == NULL)
+        ereport(ERROR,
+                (errcode(ERRCODE_FDW_DYNAMIC_PARAMETER_VALUE_NEEDED),
+                errmsg("id_col is required for dc_fdw foreign tables")));
+    if (catalog == ForeignTableRelationId && text_col == NULL)
+        ereport(ERROR,
+                (errcode(ERRCODE_FDW_DYNAMIC_PARAMETER_VALUE_NEEDED),
+                errmsg("text_col is required for dc_fdw foreign tables")));
 	
 	/*
 	 * Start indexing procedures
@@ -312,12 +376,15 @@ dc_fdw_validator(PG_FUNCTION_ARGS)
 	 * Call the index function only when ForeignTable is being created.
 	 */
 	if (catalog == ForeignTableRelationId) {
-	    elog(NOTICE, "%s", "Creating Foreign Table...");
-	    elog(NOTICE, "%s", "Start indexing document collection...");
-	    dc_index(data_dir, index_dir);
+	    elog(NOTICE, "%s", "-Start indexing document collection, this may take a while...");
+	    if (strcmp(index_method, "SPIM") == 0)
+	    {
+	        spimIndex(data_dir, index_dir, atoi(buffer_size));
+        }
+	    else if (strcmp(index_method, "IM") == 0)
+	        imIndex(data_dir, index_dir);
 	}
-    
-    
+	
 	PG_RETURN_VOID();
 }
 
@@ -350,11 +417,13 @@ is_valid_option(const char *option, Oid context)
  */
 static void
 dcGetOptions(Oid foreigntableid,
-			   char **data_dir, char **index_dir, char **language, char **encoding, List **other_options)
+			   char **data_dir, char **index_dir, List **col_mapping)
 {
 	ForeignTable        *table;
 	ForeignServer       *server;
 	ForeignDataWrapper  *wrapper;
+    char                *text_col;
+    char                *id_col;
 	List	            *options;
 	ListCell            *lc,
 			            *prev;
@@ -386,8 +455,6 @@ dcGetOptions(Oid foreigntableid,
 	 */
 	*data_dir = NULL;
     *index_dir = NULL;
-    *language = NULL;
-    *encoding = NULL;
     
 	prev = NULL;
 	foreach(lc, options)
@@ -410,16 +477,18 @@ dcGetOptions(Oid foreigntableid,
             continue;
 		}
 		
-		if (strcmp(def->defname, "language") == 0)
+		if (strcmp(def->defname, "id_col") == 0)
 		{
-            *language = defGetString(def);
+			id_col = defGetString(def);
             continue;
 		}
 		
-		if (strcmp(def->defname, "encoding") == 0)
+		if (strcmp(def->defname, "text_col") == 0)
 		{
-            *encoding = defGetString(def);
+			text_col = defGetString(def);
+            continue;
 		}
+		
 	}
 	
 	/*
@@ -428,38 +497,16 @@ dcGetOptions(Oid foreigntableid,
 	 */
 	if (*data_dir == NULL)
 		elog(ERROR, "data_dir is required for dc_fdw foreign tables");
-	*other_options = options;
+	if (*data_dir == NULL)
+		elog(ERROR, "index_dir is required for dc_fdw foreign tables");
+	if (text_col == NULL)
+		elog(ERROR, "text_col is required for dc_fdw foreign tables");
+	if (id_col == NULL)
+		elog(ERROR, "id_col is required for dc_fdw foreign tables");
+	
+	/* column mapping list, index0: id, index1: content */
+	*col_mapping = list_make2(id_col, text_col);
 }
-
-/*
- * dcPlanForeignScan
- *		Create a FdwPlan for a scan on the foreign table
- */
-
-//static FdwPlan *
-//dcPlanForeignScan(Oid foreigntableid,
-//					PlannerInfo *root,
-//					RelOptInfo *baserel)
-//{
-//	FdwPlan    *fdwplan;
-//	/*char	   *data_dir;*/
-//	/*List	   *options;*/
-//
-//#ifdef DEBUG
-//    elog(NOTICE, "dcPlanForeignScan");
-//#endif
-//
-//	/* Fetch options --- we only need data_dir at this point */
-//	/*dcGetOptions(foreigntableid, &data_dir, &options);*/
-//	
-//	/* Construct FdwPlan with cost estimates */
-//	fdwplan = makeNode(FdwPlan);
-//	/*estimate_costs(root, baserel, data_dir,
-//				   &fdwplan->startup_cost, &fdwplan->total_cost);*/
-//	fdwplan->startup_cost = 100;
-//    fdwplan->total_cost = 100;
-//	return fdwplan;
-//}
 
 
 /*
@@ -471,33 +518,95 @@ dcGetForeignRelSize(PlannerInfo *root,
 					  RelOptInfo *baserel,
 					  Oid foreigntableid)
 {
-	DcFdwPlanState *fdw_private;
-    int num_of_docs;
-    int num_of_bytes;
+	DcFdwPlanState      *fpstate;
+    /* File handles */
+    File                statFile;
+    File                dictFile;
+    File                postFile;
+    /* stat info */
+    CollectionStats     *stats;
+    /* dict settings */
+    HTAB                *dict;
+    /* qual eval */
+    PushableQualNode    *qualRoot;
+    List                *allList;
     
 #ifdef DEBUG
     elog(NOTICE, "dcGetForeignRelSize");
 #endif
 
-	/*
+    /*
+     * init stats data
+     */
+    stats = (CollectionStats *) palloc(sizeof(CollectionStats));
+    
+    /*
 	 * Fetch options.  We only need filename at this point, but we might as
 	 * well get everything and not need to re-fetch it later in planning.
 	 */
-	fdw_private = (DcFdwPlanState *) palloc(sizeof(DcFdwPlanState));
+	fpstate = (DcFdwPlanState *) palloc(sizeof(DcFdwPlanState));
 	dcGetOptions(foreigntableid,
-    			   &fdw_private->data_dir, &fdw_private->index_dir,
-    			   &fdw_private->language, &fdw_private->encoding,
-                   &fdw_private->options);
-	baserel->fdw_private = (void *) fdw_private;
+	                &fpstate->data_dir,
+	                &fpstate->index_dir,
+	                &fpstate->mapping);
+	baserel->fdw_private = (void *) fpstate;
 
-	/* Estimate relation size */
-    dc_load_stat(fdw_private->index_dir, &num_of_docs, &num_of_bytes);
-    baserel->rows = (double) num_of_docs;
-    elog(NOTICE, "NUM OF DOCS: %f", baserel->rows);
-    fdw_private->dc_size = num_of_bytes;
-    fdw_private->ndocs = num_of_docs;
-	//estimate_size(root, baserel, fdw_private);
+    /*
+     * Fetch collection-wise stats
+     */
+    statFile = openStat(fpstate->index_dir);
+    loadStat(&stats, statFile);
+    closeStat(statFile);
+    fpstate->stats = stats;
+
+    /*
+     * fill in dc size information
+     */
+	estimate_size(root, baserel, fpstate, stats);
+
+	/*
+	 * Load Dictionary. Dict is stored in memory for fast access and
+	 * postings lists are in hard disk as it may be too large to fit
+	 * into main memory.
+	 */
+    dictFile = openDict(fpstate->index_dir);
+	loadDict(&dict, dictFile);
+    closeDict(dictFile);
+
+    /*
+     * Extract Quals. We only extract quals that we can push down and 
+ 	 * convert them into a tree structure for evaluation.
+ 	 *
+     * Evaluate QualTree. Filtered doc_id list. 
+	 */
+	postFile = openPost(fpstate->index_dir);
+    allList = searchTerm(ALL, dict, postFile, TRUE, FALSE);
+
+	/* no quals to push down */
+	if (extractQuals(&qualRoot, root, baserel, fpstate->mapping) == 0)
+	{
+#ifdef DEBUG
+        elog(NOTICE, "No quals to pushdown, sequential scan");
+#endif
+        fpstate->rlist = allList;
+    }
+    /* there are quals available to pushdown */
+    else
+    {
+        fpstate->rlist = evalQualTree(qualRoot, dict, postFile, allList);
+#ifdef DEBUG
+        printQualTree(qualRoot, 1);
+#endif
+        freeQualTree(qualRoot);
+    }
+
+#ifdef DEBUG
+    elog(NOTICE, "rlist length:%d", list_length(fpstate->rlist));
+#endif
+    closePost(postFile);
 }
+
+
 
 /*
  * dcGetForeignPaths
@@ -512,39 +621,33 @@ dcGetForeignPaths(PlannerInfo *root,
 					RelOptInfo *baserel,
 					Oid foreigntableid)
 {
-	DcFdwPlanState *fdw_private = (DcFdwPlanState *) baserel->fdw_private;
-	Cost		startup_cost;
-	Cost		total_cost;
-    PushableQualNode *qualRoot;
+	DcFdwPlanState  *fpstate = (DcFdwPlanState *) baserel->fdw_private;
+    ForeignPath     *path;
+	Cost            startup_cost;
+	Cost            total_cost;
+	List            *fdw_private;
 
 #ifdef DEBUG
     elog(NOTICE, "dcGetForeignPaths");
 #endif
 
 	/* Estimate costs */
-	estimate_costs(root, baserel, fdw_private,
+	estimate_costs(root, baserel, fpstate,
 				   &startup_cost, &total_cost);
-
-	/* Create a ForeignPath node and add it as only possible path */
-	add_path(baserel, (Path *)
-			 create_foreignscan_path(root, baserel,
-									 baserel->rows,
-									 startup_cost,
-									 total_cost,
-									 NIL,		/* no pathkeys */
-									 NULL,		/* no outer rel either */
-									 NIL));		/* no fdw_private data */
-    //elog(NOTICE, "xixihaha: %s", nodeToString(baserel));
-    
-	/*
-	 * If data file was sorted, and we knew it somehow, we could insert
-	 * appropriate pathkeys into the ForeignPath node to tell the planner
-	 * that.
-	 */
 	
-    extractQuals(&qualRoot, root, baserel);
-    evalQual(qualRoot, 1);
-    pfree(qualRoot);
+	/* result list after pushing down. */
+	fdw_private = lappend(NIL, fpstate->rlist);
+	fdw_private = lappend(fdw_private, fpstate->stats);
+	
+	/* Create a ForeignPath node and add it as only possible path */
+	path = create_foreignscan_path(root, baserel,
+								    baserel->rows,
+									startup_cost,
+									total_cost,
+									NIL,		/* no pathkeys */
+									NULL,		/* no outer rel either */
+									fdw_private);
+	add_path(baserel, (Path *) path);
 }
 
 /*
@@ -559,13 +662,18 @@ dcGetForeignPlan(PlannerInfo *root,
 				   List *tlist,
 				   List *scan_clauses)
 {
-	Index		scan_relid = baserel->relid;
-
+    DcFdwPlanState  *fpstate = (DcFdwPlanState *) baserel->fdw_private;
+	Index scan_relid = baserel->relid;
+	List *fdw_private;
+	
 #ifdef DEBUG
     elog(NOTICE, "dcGetForeignPlan");
 #endif
 
-
+    /* result list after pushing down. */
+	fdw_private = lappend(NIL, fpstate->rlist);
+	fdw_private = lappend(fdw_private, fpstate->stats);
+	
 	/*
 	 * We have no native ability to evaluate restriction clauses, so we just
 	 * put all the scan_clauses into the plan node's qual list for the
@@ -580,7 +688,7 @@ dcGetForeignPlan(PlannerInfo *root,
 							scan_clauses,
 							scan_relid,
 							NIL,	/* no expressions to evaluate */
-							NIL);		/* no private state either */
+							fdw_private);
 }
 
 
@@ -591,38 +699,25 @@ dcGetForeignPlan(PlannerInfo *root,
 static void
 dcExplainForeignScan(ForeignScanState *node, ExplainState *es)
 {
-	char	   *data_dir;
-    char       *index_dir;
-    char       *language;
-    char       *encoding;
-	List	   *options;
-	DcFdwExecutionState	   *fdw_private;
-	char	   *sql;
-	int         num_of_docs;
-    int         num_of_bytes;
+	char            *data_dir;
+    char            *index_dir;
+	List            *col_mapping;
+    CollectionStats *stats;
 
 #ifdef DEBUG
     elog(NOTICE, "dcExplainForeignScan");
 #endif
 
-
+    /* retrieve stats list */
+    stats = (CollectionStats *) list_nth( (List *) ((ForeignScan *) node->ss.ps.plan)->fdw_private, 1);
 	/* Fetch options --- we only need data_dir at this point */
 	dcGetOptions(RelationGetRelid(node->ss.ss_currentRelation),
-				   &data_dir, &index_dir, &language, &encoding, &options);
-	/* load stats */
-	dc_load_stat(index_dir, &num_of_docs, &num_of_bytes);
+				   &data_dir, &index_dir, &col_mapping);
+				   
 	ExplainPropertyText("Foreign Document Collection", data_dir, es);
-	
-	//sql = strVal(list_nth(fdw_private, 1));
-	//ExplainPropertyText("Remote SQL", sql, es);
-	
-	/* Suppress dc size if we're not showing cost details */
-	ExplainPropertyLong("Foreign Document Collection Size", (long) num_of_bytes, es);
-	ExplainPropertyLong("Number of Documents", (long) num_of_docs, es);
-	//if (es->costs)
-	//{
-		
-	//}
+	ExplainPropertyLong("Foreign Document Collection Size", (long) stats->numOfBytes, es);
+	ExplainPropertyLong("Number of Documents", (long) stats->numOfDocs, es);
+	ExplainPropertyText("Index Location", index_dir, es);
 }
 
 /*
@@ -634,14 +729,11 @@ dcBeginForeignScan(ForeignScanState *node, int eflags)
 {
 	char	   *data_dir;
     char       *index_dir;
-    char       *language;
-    char       *encoding;
-	List	   *options;
 	DcFdwExecutionState *festate;
-    int         num_of_docs;
-    int         num_of_bytes;
-    //List       *qual_list;
-    //ListCell		*lc;
+    int         *mask;
+    List        *mappingList;
+    int         numOfColumns;
+    Relation    rel;
 
 #ifdef DEBUG
     elog(NOTICE, "dcBeginForeignScan");
@@ -654,42 +746,23 @@ dcBeginForeignScan(ForeignScanState *node, int eflags)
 
 	/* Fetch options of foreign table */
 	dcGetOptions(RelationGetRelid(node->ss.ss_currentRelation),
-				   &data_dir, &index_dir, &language, &encoding, &options);
-	
-	/* Load dictionary into memory */
-	//dc_load_dict(index_dir);
-    elog(NOTICE, "%d", node->ss.ps.type);
-	
-	/*
-    foreach (lc, node->ss.ps.qual)
-    {
-        OpExpr	*op;
-        ExprState  *state = lfirst(lc);
-        Node	*left;
-        
-        if (IsA(state->expr, OpExpr))
-        {
-            OpExpr	*op = (OpExpr *) node;
-            if (list_length(op->args) == 2)
-                elog(NOTICE, "%s", "OK");
-            else
-                elog(NOTICE, "%s", "NOT OK");
-            left = list_nth(op->args, 0);
-        }
-        elog(NOTICE, "%d", state->type);
-        elog(NOTICE, "%d", state->expr->type);
-    }
-    */
-    dc_load_stat(index_dir, &num_of_docs, &num_of_bytes);
+				   &data_dir, &index_dir, &mappingList);
+	rel = heap_open(RelationGetRelid(node->ss.ss_currentRelation), AccessShareLock);
+    numOfColumns = dc_col_mapping_mask(rel, mappingList, &mask);
+    heap_close(rel, NoLock);
+    
 	/*
 	 * Save state in node->fdw_state.  We must save enough information to call
 	 * BeginCopyFrom() again.
 	 */
 	festate = (DcFdwExecutionState *) palloc(sizeof(DcFdwExecutionState));
+	festate->rlist = (List *) list_nth( (List *) ((ForeignScan *) node->ss.ps.plan)->fdw_private, 0);
+	festate->stats = (CollectionStats *) list_nth( (List *) ((ForeignScan *) node->ss.ps.plan)->fdw_private, 1);
+    festate->rlistptr = 0;
 	festate->data_dir = data_dir;
 	festate->dir_state = AllocateDir(data_dir);
-	festate->dc_size = num_of_bytes;        /* collection size in bytes */
-	festate->ndocs = num_of_docs;		    /* estimate of number of rows in file */
+	festate->mask = mask;
+    festate->ncols = numOfColumns;
 	/* Store the additional state info */
     festate->attinmeta = TupleDescGetAttInMetadata(node->ss.ss_currentRelation->rd_att);
     
@@ -706,40 +779,43 @@ dcIterateForeignScan(ForeignScanState *node)
 {
 	DcFdwExecutionState *festate = (DcFdwExecutionState *) node->fdw_state;
 	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
-	struct dirent *dirent;
     List *tupleItemList;
-    
+    bool end_of_list = FALSE;
+    Datum *values;
+    bool *nulls;
 
-    while ( (dirent = ReadDir(festate->dir_state, festate->data_dir)) != NULL)
+#ifdef DEBUG
+    elog(NOTICE, "dcIterateForeignScan");
+#endif
+    
+    if (list_length(festate->rlist) > festate->rlistptr)
     {
-        StringInfoData sid_data_dir;
-        mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
-        File curr_file;
-        char *buffer;
-        int sz;
+        StringInfoData sidDocPath;
+        StringInfoData sidFName;
+        File currFile;
+        char *buf;
+        int doc_id = list_nth_int(festate->rlist, festate->rlistptr);
         
-        /* skip . and .. */
-        if (strcmp(".", dirent->d_name) == 0) continue;
-        if (strcmp("..", dirent->d_name) == 0) continue;
+        initStringInfo(&sidFName);
+        appendStringInfo(&sidFName, "%d", doc_id);
         
         /* get full path/name of the file */
-        initStringInfo(&sid_data_dir);
-        appendStringInfo(&sid_data_dir, "%s/%s", festate->data_dir, dirent->d_name);
+        initStringInfo(&sidDocPath);
+        appendStringInfo(&sidDocPath, "%s/%s", festate->data_dir, sidFName.data);
         
-        /* read the content of the file */
-        curr_file = PathNameOpenFile(sid_data_dir.data, O_RDONLY,  mode);
-        sz = FileSeek(curr_file, 0, SEEK_END);
-        FileSeek(curr_file, 0, SEEK_SET);
-        buffer = (char *) palloc(sizeof(char) * (sz + 1) );
-        FileRead(curr_file, buffer, sz);
-        buffer[sz] = 0;
+        /*
+         * load file content into buffer
+         */
+        currFile = openDoc(sidDocPath.data);
+        loadDoc(&buf, currFile);
+        closeDoc(currFile);
         
-        tupleItemList = list_make3(dirent->d_name, dirent->d_name, buffer);  
+        tupleItemList = list_make2(sidFName.data, buf);  
         
-        /* only get 1 entry */
-        break;
+        festate->rlistptr += 1;
     }
-
+    else
+        end_of_list = TRUE;
 	/*
 	 * The protocol for loading a virtual tuple into a slot is first
 	 * ExecClearTuple, then fill the values/isnull arrays, then
@@ -753,19 +829,14 @@ dcIterateForeignScan(ForeignScanState *node)
 	 * foreign tables.
 	 */
     ExecClearTuple(slot);
-	if (dirent != NULL)
+	if (!end_of_list)
 	{
-	    char **values;
         HeapTuple tuple;
-        int i;
-
-        values = (char **) palloc(sizeof(char *) * 3);
-        for (i = 0; i < 3; i++)
-        {
-            values[i] = list_nth(tupleItemList, i);
-        }
-
-        tuple = BuildTupleFromCStrings(festate->attinmeta, values);
+        
+        values = (Datum *) palloc(festate->ncols * sizeof(Datum));
+    	nulls = (bool *) palloc(festate->ncols * sizeof(bool));
+        cstring_tuple(&values, &nulls, festate->mask, festate->ncols, tupleItemList);
+        tuple = BuildTupleFromCStrings(festate->attinmeta, (char **) values);
         ExecStoreTuple(tuple, slot, InvalidBuffer, FALSE);
 	}
 
@@ -779,15 +850,15 @@ dcIterateForeignScan(ForeignScanState *node)
 static void
 dcEndForeignScan(ForeignScanState *node)
 {
-	DcFdwExecutionState *festate = (DcFdwExecutionState *) node->fdw_state;
+    DcFdwExecutionState *festate = (DcFdwExecutionState *) node->fdw_state;
 
 #ifdef DEBUG
     elog(NOTICE, "dcEndForeignScan");
 #endif
 
 	/* if festate is NULL, we are in EXPLAIN; nothing to do */
-	//if (festate)
-	//	EndCopyFrom(festate->cstate);
+	if (festate == NULL)
+		return;
 }
 
 /*
@@ -797,11 +868,14 @@ dcEndForeignScan(ForeignScanState *node)
 static void
 dcReScanForeignScan(ForeignScanState *node)
 {
-	/*DcFdwExecutionState *festate = (DcFdwExecutionState *) node->fdw_state;*/
+	DcFdwExecutionState *festate = (DcFdwExecutionState *) node->fdw_state;
 
 #ifdef DEBUG
     elog(NOTICE, "dcReScanForeignScan");
 #endif
+    /* If we haven't have valid result yet, nothing to do. */
+    if (festate->rlist == NIL)
+		return;
 
 }
 
@@ -814,29 +888,36 @@ dcAnalyzeForeignTable(Relation relation,
 						AcquireSampleRowsFunc *func,
 						BlockNumber *totalpages)
 {
-	char	   *data_dir;
-	char	   *index_dir;
-	char	   *language;
-	char	   *encoding;
-	List	   *options;
-	struct stat stat_buf;
+	char            *data_dir;
+	char            *index_dir;
+	List	        *mappings;
+    File            statFile;
+    CollectionStats *stats;
+	
+#ifdef DEBUG
+    elog(NOTICE, "dcAnalyzeForeignTable");
+#endif
 
+    stats = (CollectionStats *) palloc(sizeof(CollectionStats));
 	/* Fetch options of foreign table */
 	dcGetOptions(RelationGetRelid(relation),
-	        &data_dir, &index_dir,
-	        &language, &encoding,
-	        &options);
-
+	        &data_dir, &index_dir, &mappings);
 	/*
-	 * Get size of the file.  (XXX if we fail here, would it be better to just
+	 * Get size of the collection.  (XXX if we fail here, would it be better to just
 	 * return false to skip analyzing the table?)
 	 */
-
+	statFile = openStat(index_dir);
+    loadStat(&stats, statFile);
+    closeStat(statFile);
+    
 	/*
 	 * Convert size to pages.  Must return at least 1 so that we can tell
 	 * later on that pg_class.relpages is not default.
 	 */
-
+	*totalpages = (stats->numOfBytes + (BLCKSZ - 1)) / BLCKSZ;
+ 	if (*totalpages < 1)
+ 		*totalpages = 1;
+ 		
 	*func = dc_acquire_sample_rows;
 
 	return true;
@@ -853,11 +934,40 @@ dcAnalyzeForeignTable(Relation relation,
  */
 static void
 estimate_size(PlannerInfo *root, RelOptInfo *baserel,
-			  DcFdwPlanState *fdw_private)
-{
-	/* Open stats file and Save the output-rows estimate for the planner */
-	baserel->rows = 7000;
-    elog(NOTICE, "TP: %d", baserel->tuples);
+			  DcFdwPlanState *fpstate, CollectionStats *stats)
+{   
+	BlockNumber pages;
+	double		nrows;
+    int         nbytes = stats->numOfBytes;
+
+	/*
+	 * Convert size to pages for use in I/O cost estimate later.
+	 */
+	pages = (nbytes + (BLCKSZ - 1)) / BLCKSZ;
+	if (pages < 1)
+		pages = 1;
+	fpstate->pages = pages;
+
+	/*
+	 * Estimate the number of tuples in the collection.
+	 */
+	fpstate->ntuples = (double) stats->numOfDocs;
+
+	/*
+	 * Now estimate the number of rows returned by the scan after applying the
+	 * baserestrictinfo quals.
+	 */
+	nrows = fpstate->ntuples *
+		clauselist_selectivity(root,
+							   baserel->baserestrictinfo,
+							   0,
+							   JOIN_INNER,
+							   NULL);
+
+	nrows = clamp_row_est(nrows);
+
+	/* Save the output-rows estimate for the planner */
+	baserel->rows = nrows;
 }
 
 
@@ -869,11 +979,11 @@ estimate_size(PlannerInfo *root, RelOptInfo *baserel,
  */
 static void
 estimate_costs(PlannerInfo *root, RelOptInfo *baserel,
-			   DcFdwPlanState *fdw_private,
+			   DcFdwPlanState *fpstate,
 			   Cost *startup_cost, Cost *total_cost)
 {
-	BlockNumber pages = fdw_private->pages;
-	double		ntuples = fdw_private->ndocs;
+	BlockNumber pages = fpstate->pages;
+	double		ntuples = fpstate->ntuples;
 	Cost		run_cost = 0;
 	Cost		cpu_per_tuple;
 
@@ -907,9 +1017,225 @@ estimate_costs(PlannerInfo *root, RelOptInfo *baserel,
  * currently (the planner only pays attention to correlation for indexscans).
  */
 static int
-dc_acquire_sample_rows(Relation onerel, int elevel,
+dc_acquire_sample_rows(Relation rel, int elevel,
                         HeapTuple *rows, int targrows,
                         double *totalrows, double *totaldeadrows)
 {
-    return 0;
+    int             numrows = 0;
+	double          rowstoskip = -1;	/* -1 means not set yet */
+	double          rstate;
+	TupleDesc       tupDesc;
+	char            *data_dir;
+    char            *index_dir;
+	List            *mappings;
+    int             *mask;
+    int             mask_len;
+    Datum           *values;
+    bool            *nulls;
+    DIR             *dir;
+    struct dirent   *dirent;
+	MemoryContext   oldcontext = CurrentMemoryContext;
+	MemoryContext   tupcontext;
+    AttInMetadata   *attinmeta;
+
+#ifdef DEBUG
+    elog(NOTICE, "dc_acquire_sample_rows");
+#endif
+
+	Assert(rel);
+	Assert(targrows > 0);
+	
+	
+	/* Fetch options of foreign table */
+	dcGetOptions(RelationGetRelid(rel),
+	            &data_dir,
+	            &index_dir,
+                &mappings);
+                
+    tupDesc = RelationGetDescr(rel);
+    attinmeta = TupleDescGetAttInMetadata(rel->rd_att);
+    mask_len = dc_col_mapping_mask(rel, mappings, &mask);
+    values = (Datum *) palloc(mask_len * sizeof(Datum));
+	nulls = (bool *) palloc(mask_len * sizeof(bool));
+	
+    /* prepare to read collection */
+    dir = AllocateDir(data_dir);
+    
+	/*
+	 * Use per-tuple memory context to prevent leak of memory used to read
+	 * rows from the file with Copy routines.
+	 */
+	tupcontext = AllocSetContextCreate(CurrentMemoryContext,
+									   "dc_fdw temporary context",
+									   ALLOCSET_DEFAULT_MINSIZE,
+									   ALLOCSET_DEFAULT_INITSIZE,
+									   ALLOCSET_DEFAULT_MAXSIZE);
+									   
+	/* Prepare for sampling rows */
+	rstate = anl_init_selection_state(targrows);
+
+	*totalrows = 0;
+	*totaldeadrows = 0;
+	
+	while ( (dirent = ReadDir(dir, data_dir)) != NULL)
+    {   
+        File            currFile;
+        List            *colData;
+        StringInfoData  sidDocPath;
+        StringInfoData  sidFName;
+        char            *buf;
+        
+		/* Check for user-requested abort or sleep */
+		vacuum_delay_point();
+		
+        if (strcmp(".", dirent->d_name) == 0) continue;
+        if (strcmp("..", dirent->d_name) == 0) continue;
+        
+		/* Fetch next row */
+		MemoryContextReset(tupcontext);
+		MemoryContextSwitchTo(tupcontext);
+		
+		/* get full path/name of the file */
+		initStringInfo(&sidFName);
+        appendStringInfo(&sidFName, "%d", atoi(dirent->d_name));
+        initStringInfo(&sidDocPath);
+        appendStringInfo(&sidDocPath, "%s/%s", data_dir, sidFName.data);
+        
+        /*
+         * load file content into buffer
+         */
+        currFile = openDoc(sidDocPath.data);
+        loadDoc(&buf, currFile);
+        closeDoc(currFile);
+           
+        colData = list_make2(sidFName.data, buf);
+        cstring_tuple(&values, &nulls, mask, mask_len, colData);
+        
+		MemoryContextSwitchTo(oldcontext);
+
+		/*
+		 * The first targrows sample rows are simply copied into the
+		 * reservoir.  Then we start replacing tuples in the sample until we
+		 * reach the end of the relation. This algorithm is from Jeff Vitter's
+		 * paper (see more info in commands/analyze.c).
+		 */
+		if (numrows < targrows)
+		{
+			rows[numrows++] = BuildTupleFromCStrings(attinmeta, (char **) values);
+		}
+		else
+		{
+			/*
+			 * t in Vitter's paper is the number of records already processed.
+			 * If we need to compute a new S value, we must use the
+			 * not-yet-incremented value of totalrows as t.
+			 */
+			if (rowstoskip < 0)
+				rowstoskip = anl_get_next_S(*totalrows, targrows, &rstate);
+
+			if (rowstoskip <= 0)
+			{
+				/*
+				 * Found a suitable tuple, so save it, replacing one old tuple
+				 * at random
+				 */
+				int			k = (int) (targrows * anl_random_fract());
+
+				Assert(k >= 0 && k < targrows);
+				heap_freetuple(rows[k]);
+				rows[k] = BuildTupleFromCStrings(attinmeta, (char **) values);
+			}
+
+			rowstoskip -= 1;
+		}
+
+		*totalrows += 1;
+	}
+
+	/* Clean up. */
+	MemoryContextDelete(tupcontext);
+
+    FreeDir(dir);
+
+	pfree(values);
+	pfree(nulls);
+    pfree(mask);
+
+	/*
+	 * Emit some interesting relation info
+	 */
+	ereport(elevel,
+			(errmsg("\"%s\": table contains %.0f rows; "
+					"%d rows in sample",
+					RelationGetRelationName(rel),
+					*totalrows, numrows)));
+
+	return numrows;
+}
+
+/*
+ * produce a mask for column mapping
+ */
+int
+dc_col_mapping_mask(Relation rel, List *mappingList, int **mask)
+{
+    int i;
+    /* Fetch the table column info */
+    int numOfColumns = rel->rd_att->natts;
+    *mask = (int *) palloc(sizeof(int) * numOfColumns);
+    
+#ifdef DEBUG
+    elog(NOTICE, "dc_col_mapping_mask");
+#endif
+    
+    for (i = 0; i < numOfColumns; i++)
+    {
+        StringInfoData  colName;
+        int o = 0;
+        ListCell   *colMapping;
+        
+        /* init mask value as null */
+        (*mask)[i] = -1;
+
+        /* retrieve the column name */
+        initStringInfo(&colName);
+        appendStringInfo(&colName, "%s", NameStr(rel->rd_att->attrs[i]->attname));
+        
+        /* check if the column name is mapping to a different name in remote table */
+        foreach(colMapping, mappingList)
+        {
+            char *actualName = (char *) lfirst(colMapping);
+            
+            if (strcmp(actualName, colName.data) == 0)
+            {
+                (*mask)[i] = o;
+                break;
+            }
+            o++;
+        }
+    }
+    
+    return numOfColumns;
+}
+
+/*
+ * CString representation of the tuple
+ */
+void
+cstring_tuple(Datum **tuple_as_array, bool **nulls, int *mask, int mask_len, List *values)
+{
+    int i;
+    
+    for (i = 0; i < mask_len; i++)
+    {
+        if (mask[i] == -1)
+        {
+            (*tuple_as_array)[i] = (Datum) NULL;
+            (*nulls)[i] = TRUE;
+        }
+        else {
+            (*tuple_as_array)[i] = (Datum) list_nth(values, mask[i]);;
+            (*nulls)[i] = FALSE;
+        }
+    }
 }

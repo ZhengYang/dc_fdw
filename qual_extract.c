@@ -59,6 +59,8 @@ extractQuals(PushableQualNode **qualRoot, PlannerInfo *root, RelOptInfo *baserel
 	ListCell    *lc;
     int         pushableQualCounter = 0;
     *qualRoot = (PushableQualNode *) palloc(sizeof(PushableQualNode));
+
+    MemSet(*qualRoot, 0, sizeof(PushableQualNode));
     
 #ifdef DEBUG
     elog(NOTICE, "extractQuals");

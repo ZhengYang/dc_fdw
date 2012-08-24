@@ -1,0 +1,3 @@
+CREATE EXTENSION dc_fdw;
+CREATE SERVER dc_server FOREIGN DATA WRAPPER dc_fdw;
+

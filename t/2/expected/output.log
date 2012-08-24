@@ -1,0 +1,31 @@
+SELECT id,title,substr(content,0,16) FROM dc_table_2 WHERE content @@ 'January';
+ id | title |     substr      
+----+-------+-----------------
+ 1  |       | BAHIA COCOA REV
+ 5  |       | NATIONAL AVERAG
+(2 rows)
+
+SELECT id,title,substr(content,0,16) FROM dc_table_2 WHERE content @@ 'Cocoa';
+ id | title |     substr      
+----+-------+-----------------
+ 1  |       | BAHIA COCOA REV
+(1 row)
+
+SELECT id,title,substr(content,0,16) FROM dc_table_2 WHERE content @@ 'feedgrain';
+ id | title |     substr      
+----+-------+-----------------
+ 5  |       | NATIONAL AVERAG
+(1 row)
+
+SELECT id,title,substr(content,0,16) FROM dc_table_2 WHERE content @@ 'Cocoa' AND content @@ 'feedgrain';
+ id | title | substr 
+----+-------+--------
+(0 rows)
+
+SELECT id,title,substr(content,0,16) FROM dc_table_2 WHERE content @@ 'Cocoa' OR content @@ 'feedgrain';
+ id | title |     substr      
+----+-------+-----------------
+ 1  |       | BAHIA COCOA REV
+ 5  |       | NATIONAL AVERAG
+(2 rows)
+

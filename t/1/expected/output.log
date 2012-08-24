@@ -1,51 +1,51 @@
-SELECT id,title FROM dc_table_1 WHERE content @@ 'Brazilian';
- id | title 
-----+-------
- 1  | 1
+SELECT id,title,substr(content,0,16) FROM dc_table_1 WHERE content @@ 'Brazilian';
+ id | title |     substr      
+----+-------+-----------------
+ 1  |       | BAHIA COCOA REV
 (1 row)
 
-SELECT id,title FROM dc_table_1 WHERE content @@ 'brazilian';
- id | title 
-----+-------
- 1  | 1
+SELECT id,title,substr(content,0,16) FROM dc_table_1 WHERE content @@ 'brazilian';
+ id | title |     substr      
+----+-------+-----------------
+ 1  |       | BAHIA COCOA REV
 (1 row)
 
-SELECT id,title FROM dc_table_1 WHERE content @@ 'brazil';
- id | title 
-----+-------
+SELECT id,title,substr(content,0,16) FROM dc_table_1 WHERE content @@ 'brazil';
+ id | title | substr 
+----+-------+--------
 (0 rows)
 
-SELECT id,title FROM dc_table_1 WHERE content @@ 'Cocoa';
- id | title 
-----+-------
- 1  | 1
+SELECT id,title,substr(content,0,16) FROM dc_table_1 WHERE content @@ 'Cocoa';
+ id | title |     substr      
+----+-------+-----------------
+ 1  |       | BAHIA COCOA REV
 (1 row)
 
-SELECT id,title FROM dc_table_1 WHERE content @@ 'Chocolate';
- id | title 
-----+-------
+SELECT id,title,substr(content,0,16) FROM dc_table_1 WHERE content @@ 'Chocolate';
+ id | title | substr 
+----+-------+--------
 (0 rows)
 
-SELECT id,title FROM dc_table_1 WHERE content @@ 'Brazilian' AND content @@ 'Cocoa';
- id | title 
-----+-------
- 1  | 1
+SELECT id,title,substr(content,0,16) FROM dc_table_1 WHERE content @@ 'Brazilian' AND content @@ 'Cocoa';
+ id | title |     substr      
+----+-------+-----------------
+ 1  |       | BAHIA COCOA REV
 (1 row)
 
-SELECT id,title FROM dc_table_1 WHERE content @@ 'Brazilian' AND content @@ 'Chocolate';
- id | title 
-----+-------
+SELECT id,title,substr(content,0,16) FROM dc_table_1 WHERE content @@ 'Brazilian' AND content @@ 'Chocolate';
+ id | title | substr 
+----+-------+--------
 (0 rows)
 
-SELECT id,title FROM dc_table_1 WHERE content @@ 'Brazilian' OR content @@ 'Cocoa';
- id | title 
-----+-------
- 1  | 1
+SELECT id,title,substr(content,0,16) FROM dc_table_1 WHERE content @@ 'Brazilian' OR content @@ 'Cocoa';
+ id | title |     substr      
+----+-------+-----------------
+ 1  |       | BAHIA COCOA REV
 (1 row)
 
-SELECT id,title FROM dc_table_1 WHERE content @@ 'Brazilian' OR content @@ 'Chocolate';
- id | title 
-----+-------
- 1  | 1
+SELECT id,title,substr(content,0,16) FROM dc_table_1 WHERE content @@ 'Brazilian' OR content @@ 'Chocolate';
+ id | title |     substr      
+----+-------+-----------------
+ 1  |       | BAHIA COCOA REV
 (1 row)
 

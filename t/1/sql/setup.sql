@@ -3,8 +3,10 @@ SERVER dc_server
 OPTIONS (
     data_dir '/tmp/dc_fdw/t/1/training',
     index_dir '/tmp/dc_fdw/t/1/index',
-    language 'en',
-    encoding 'ascii'
+    index_method 'SPIM',
+    buffer_size '10',
+    id_col 'id',
+    text_col 'content'
 );
 
 

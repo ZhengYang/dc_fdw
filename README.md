@@ -25,7 +25,7 @@ Otherwise, a sequential scan on all the documents in the collection is expected.
 
 ###Usage
 
-The following parameters can be set on a CouchDB foreign server:
+The following parameters can be set on a document collection foreign server:
 
 	data_dir      [where the files in a document collection are located]
 	index_dir     [where the index files are located: postings file, dictionary file]
